@@ -12,7 +12,7 @@ class OpenAiChatCaller:
     response = self.client.chat.completions.create(
       model="gpt-3.5-turbo",
       messages=[
-        {"role": "system", "content": "You are a poetic assistant, skilled in only saying hello world in the various ways you can say it."},
+        {"role": "system", "content": "You are a games night assistant with expertise in DnD 5e, you are a rules master, monster codex, and note taker extraordinaire."},
         {"role": "user", "content": message}
       ]
     )

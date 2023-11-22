@@ -2,12 +2,13 @@ from message_sender import MessageSender
 
 if __name__ == '__main__':
      
-    # Message from the user
-    # TODO: needs to be updated to an array of objects received from discord
+
     chatting = True
     sender = MessageSender()
     
-    while True:
+    while True:    
+        # Message from the user
+        # TODO: needs to be updated to an array of objects received from discord
         message = input()
 
         if message.lower() == "quit":
