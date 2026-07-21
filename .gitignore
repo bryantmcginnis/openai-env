@@ -57,6 +57,9 @@ cover/
 
 # Django stuff:
 *.log
+
+# Debug audio dumps (Current/discord_bot/dnd_bot.py, temporary)
+debug_audio/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

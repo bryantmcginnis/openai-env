@@ -1,20 +1,32 @@
-from message_sender import MessageSender
+import logging
+import os
 
-if __name__ == '__main__':
-     
+from dotenv import load_dotenv
 
-    chatting = True
-    sender = MessageSender()
-    
-    while True:    
-        # Message from the user
-        # TODO: needs to be updated to an array of objects received from discord
-        message = input()
+from discord_bot.dnd_bot import bot
 
-        if message.lower() == "quit":
-            break
+load_dotenv()
 
-        else:
-            response = sender.send(message)
-            # print("DnD Oracle: ", response.strip("\n").strip())
-            print("DnD Oracle: ", response.content)
+# py-cord doesn't configure logging itself (unlike newer discord.py, it has
+# no setup_logging() helper) -- without this, library messages fall back to
+# logging's bare "handler of last resort" and our own log calls go nowhere.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+# discord.voice.receive.reader logs a harmless "Received unexpected rtcp
+# packet type=200" (a normal RTCP Sender Report) at INFO on every one --
+# several per second during a recording session, drowning out anything
+# else. Quieted now that the DAVE decrypt path is confirmed working; bump
+# back to DEBUG here (or per-module) if diagnosing voice/opus again.
+logging.getLogger("discord.voice.receive.reader").setLevel(logging.WARNING)
+
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        raise SystemExit(
+            "DISCORD_BOT_TOKEN is not set. Copy .env.example to .env and fill it in."
+        )
+
+    bot.run(token)

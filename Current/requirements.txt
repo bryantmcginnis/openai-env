@@ -1,0 +1,35 @@
+# TEMPORARY: installed from an unmerged upstream PR branch, not a release.
+# 2.7.x has no DAVE (voice E2EE) support at all, so it can't connect to
+# voice on servers where Discord enforces it (ConnectionClosed 4017).
+# Released 2.8.0 connects, but its DAVE decrypt path silently passes
+# still-encrypted bytes to the Opus decoder when the DAVE session isn't
+# ready, producing OpusError: corrupted stream and killing the whole
+# recording thread. PR #3159 (https://github.com/Pycord-Development/pycord/
+# pull/3159, tracked under issue #3139) fixes the decrypt ordering and adds
+# PLC fallback instead of crashing. Pinned to the exact commit tested, not
+# the mutable PR ref, so a fresh install doesn't silently pick up changes
+# if the PR is force-pushed. Swap for an official release once #3159 merges
+# and ships. (start_recording() also needs the workarounds in
+# transcription/audio_sink.py's UtteranceSink -- __sink_listeners__,
+# walk_children, is_opus -- and dnd_bot.py's manual sink.init() call, none
+# of which are specific to this PR.)
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord@05cf65fa6d81567a8a4347ac961a093981554137
+anthropic>=0.40.0
+faster-whisper>=1.0.0
+python-dotenv>=1.0.0
+numpy>=1.24
+
+# GPU acceleration for faster-whisper on Windows: ships cuBLAS/cuDNN as DLLs
+# inside the venv instead of requiring a system CUDA Toolkit install. See
+# transcription/transcriber.py's _register_cuda_dll_dirs(). nvjitlink is a
+# genuine runtime dependency of cuBLAS 12.x that pip does NOT pull in
+# automatically -- without it, cuBLAS itself fails to load with a
+# misleading "Library cublas64_12.dll is not found or cannot be loaded"
+# (Windows reports an unresolved *dependency* of a DLL the same way it
+# reports the DLL itself being missing). cuda_nvrtc IS auto-installed as a
+# transitive dependency of cublas today, but is pinned explicitly here since
+# our code imports it by name.
+nvidia-cublas-cu12; sys_platform == "win32"
+nvidia-cudnn-cu12; sys_platform == "win32"
+nvidia-cuda-nvrtc-cu12; sys_platform == "win32"
+nvidia-nvjitlink-cu12; sys_platform == "win32"
