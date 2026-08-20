@@ -19,8 +19,13 @@ SILENCE_RMS_THRESHOLD = 300.0  # int16 RMS below this counts as silence
 # Pause length that ends an utterance. Lower = lower latency (transcription
 # starts sooner after someone stops talking) but chops mid-sentence more
 # readily when someone pauses to think, which costs Whisper some context.
-# 400ms is roughly a natural sentence-boundary pause.
-SILENCE_HANG_MS = 400
+# 400ms is roughly a natural sentence-boundary pause -- too tight in
+# practice for a DM narrating at length, who pauses for breath and for
+# effect mid-thought. 900ms rides through those and only ends the utterance
+# on a real stop. Continuations are stitched back together downstream by
+# discord_bot/transcript_writer.py, so a higher value here costs a little
+# latency but no longer means a separate message per fragment.
+SILENCE_HANG_MS = 900
 MIN_UTTERANCE_MS = 300  # discard shorter blips (coughs, mic taps)
 # Hard cap that force-flushes a buffer even without a pause, so a
 # continuous talker still gets transcribed in chunks instead of nothing

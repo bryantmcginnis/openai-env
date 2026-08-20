@@ -1,0 +1,127 @@
+# ============================================================================
+# CAMPAIGN VOCABULARY
+# ============================================================================
+# Names Whisper has no chance of guessing. These get fed to the transcriber
+# as a bias hint, so it writes "Vesper Kane" instead of "Vesper cane" or
+# "Whisper Cain". This is the single biggest accuracy lever you have.
+#
+# FORMAT
+#   One term per line. Anything after a # is a comment. Blank lines ignored.
+#   Commas on a line also work, so you can paste in a list.
+#
+# THE BUDGET -- READ THIS
+#   Whisper's prompt is capped at ~223 tokens, which after the built-in 5e
+#   glossary leaves room for roughly 30-40 short campaign terms. That is a
+#   hard ceiling in Whisper itself, not a setting we can raise.
+#
+#   Terms nearest the TOP of this file are kept first. If you overflow, the
+#   bottom entries are dropped and you'll get a warning in bot.log saying
+#   exactly which ones. So: most-mangled, most-frequent names at the top.
+#
+# WHAT TO ADD
+#   Proper nouns a general speech model has never seen: PCs, recurring NPCs,
+#   place names, factions, homebrew items and spells.
+#
+# WHAT NOT TO ADD
+#   - Ordinary English words ("the tavern", "the sword") -- wasted budget.
+#   - Standard 5e terms (Fireball, Paladin, Counterspell, owlbear, d20) --
+#     already covered by the built-in glossary in dnd_vocabulary.py.
+#   - One-off NPCs who appeared once and died. Keep this list live: prune
+#     names that stop coming up.
+#
+# Takes effect on the next bot restart.
+# ============================================================================
+
+
+# --- PLAYER CHARACTERS -------------------------------------------------------
+# The highest-value entries in the file. Said constantly, and almost always
+# invented names. Include surnames and any nickname the table actually uses.
+# If a name is spelled unusually, write the spelling you want to READ in the
+# transcript -- Whisper will bias toward it when it hears the sound.
+#
+#   Vesper Kane
+#   Bren Alderhad
+#   Kara Sunmantle
+Sykth = sixth, *sicks, sikths, *syk
+Sykth Seventh
+Thia = *thea, *teya, tia
+Amastacia
+Llyr = clear, *cleer, lear, leer 
+Mabmoor  
+
+
+# --- THE PARTY / VEHICLES / BASE ---------------------------------------------
+# What the group calls itself, plus any ship, cart, airship, or stronghold
+# that gets named out loud.
+#
+#   the Ninth Lantern
+The Partnership of the Jade Frog
+Order of the Jade Frog
+Flus Pives 
+
+
+# --- RECURRING NPCs ----------------------------------------------------------
+# Quest-givers, patrons, rivals, villains -- anyone who shows up across
+# multiple sessions. One-scene NPCs aren't worth the budget.
+#
+#   Aldric Thornwood
+#   Sister Meline
+#   the Scarred Man
+Nessus Thorne, Declo, Professor Emmett, Phalahan Firstnote
+
+
+
+# --- PLACES ------------------------------------------------------------------
+# Cities, regions, taverns, dungeons, landmarks. Include the article if you
+# say it ("the Sunken Archive", not "Sunken Archive").
+#
+#   Thornwood
+#   the Sunken Archive
+#   Greyhollow
+Temple of Selune, Temple of umberley
+Chointhar River
+Baulders Gate
+
+
+
+# --- FACTIONS & ORGANISATIONS ------------------------------------------------
+# Guilds, cults, noble houses, orders, armies.
+#
+#   the Ashen Guild
+#   House Verrin
+The Twelve Families
+School of Mistra
+Church of Tyr
+
+
+# --- DEITIES, PLANES & COSMOLOGY ---------------------------------------------
+# Gods, domains, afterlives, homebrew planes.
+#
+#   Sarenne the Unlit
+Selune, Ogma, umberly Baal, Merkel
+tyr = tear
+Wakeem
+
+
+# --- HOMEBREW ITEMS & ARTIFACTS ----------------------------------------------
+# Named magic items, plot artifacts, signature weapons.
+#
+#   the Weeping Key
+The God Wrought
+
+
+
+
+# --- HOMEBREW SPELLS, ABILITIES & CREATURES ----------------------------------
+# Anything invented for this campaign that isn't in the core rules.
+#
+#   hollowlight
+#   the Rendkin
+
+
+
+# --- TABLE JARGON ------------------------------------------------------------
+# House rules and recurring phrases your table says a lot that a generic
+# model would garble. Only add these if you have budget left over.
+#
+#   inspiration die

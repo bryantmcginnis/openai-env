@@ -126,6 +126,30 @@ Fill in:
 
 ## Running the bot
 
+### The easy way
+
+Double-click **`start_bot.bat`**, or the "D&D Bot" shortcut on your Desktop.
+The console window shows the live log; close it to stop the bot.
+
+To create the Desktop and Start Menu shortcuts (once):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_shortcut.ps1
+```
+
+Then right-click the Desktop shortcut → *Show more options* → *Pin to
+taskbar*, or find "D&D Bot" in the Start app list → *Pin to Start*.
+
+> The shortcut targets `cmd.exe` with the batch file as an argument rather
+> than pointing at the `.bat` directly. Windows refuses to pin a shortcut to
+> the **taskbar** unless its target is an executable -- aim it at the `.bat`
+> and you get something that pins to Start but not the taskbar.
+
+`bot.log` is written by the bot itself (rotating, 5 MB × 3), so it exists
+however you started it -- no shell redirection needed.
+
+### From a terminal
+
 Activate the venv and run `main.py`:
 
 ```powershell
@@ -161,12 +185,193 @@ is the first place to look.
 
 - **Chat**: `@BotName <question>` in any channel, or DM the bot directly.
   `!forget` clears that channel's conversation history.
-- **Dice**: `!roll 2d6`
+- **Dice**: `!roll 2d6`, `!roll 1d20+5`, `!roll 2d6+1d4+3`, `!roll 4d6kh3`
+  (keep the highest 3 -- stat rolling), `!roll 1d20 adv` / `dis` for
+  advantage and disadvantage. `!roll adv` on its own is a d20 with
+  advantage. Dropped dice show ~~struck through~~ in the breakdown. See
+  [dice notation](#dice-notation).
+- **Recap**: `!recap` summarizes everything since the last recap (or since
+  the session started, if it's the first). `!recap 60` overrides that with a
+  literal last-60-minutes window. One is posted automatically when you
+  `!stoprecording`. See [session recaps](#session-recaps).
 - **Transcription**: join a voice channel, then `!record`. The bot joins
   whichever voice channel *you* are in and posts transcripts to your
   transcription channel as `**DisplayName:** text`. `!stoprecording` to stop
   and leave. There's no "drag the bot into voice" step -- it joins itself in
   response to `!record`.
+
+## Dice notation
+
+`!roll` (`discord_bot/dice.py`) takes the notation people actually type:
+
+| You type | You get |
+|---|---|
+| `!roll 2d6` | both dice and the total |
+| `!roll 1d20+5` | modifier applied, shown in the breakdown |
+| `!roll 2d6+1d4+3` | several dice terms and modifiers in one roll |
+| `!roll 4d6kh3` | roll 4, **k**eep the **h**ighest 3 -- the stat-rolling idiom |
+| `!roll 2d20kl1` | keep the lowest |
+| `!roll 4d6dl1` | **d**rop the **l**owest (same result, other way round) |
+| `!roll 1d20 adv` | roll twice, take the higher |
+| `!roll 1d20+7 dis` | disadvantage, modifier still applied |
+| `!roll adv` | bare d20 with advantage |
+
+Advantage doubles the first dice term and keeps the better half, so it's
+exactly 5e's rule for the usual `1d20+5` case. Spaces around `+`/`-` are
+fine (`1d20 + 5`). Limits: 100 dice per term, 200 per roll, up to d1000,
+10 terms. Anything it can't parse comes back as a short message saying so
+rather than a stack trace.
+
+## Session recaps
+
+`!stoprecording` posts a recap automatically, and `!recap` generates one on
+demand.
+
+### Where a recap starts, and why it isn't a timer
+
+Nothing about the boundary lives in the bot's memory -- it's re-derived from
+the transcription channel every time, so a mid-session restart doesn't cost
+you the earlier half of the night. `_resolve_recap_start()` walks the
+channel backwards from now and stops at whichever of these it reaches first:
+
+- **the last recap it posted** -- so a second `!recap` covers only what has
+  happened since the first, instead of retelling the whole evening;
+- **a gap longer than `SESSION_GAP_MINUTES`** (90) -- the start of tonight's
+  session. This is what makes restarts survivable: the bot's own start time
+  is gone, but the transcript still shows where the session began.
+
+Because the scan stops at the *first* boundary it meets, the more recent one
+always wins -- last week's recap can't beat this week's session start.
+
+Recaps are posted as **embeds** titled "Session recap", which does double
+duty: an embed carries no message text, so a recap can never be scooped back
+up as transcript and fed into the next recap, and the title makes it a
+self-identifying marker for the scan above. The footer records the window it
+covered.
+
+`!recap 60` takes an explicit window **literally** -- if you ask for 60
+minutes you get 60 minutes, even where that re-covers ground an earlier
+recap already handled. Use it to redo a recap you didn't like, or to catch
+up on just the last fight. Bare `!recap` is the one that tracks boundaries.
+
+Both forms are capped at `MAX_LOOKBACK_HOURS` (24) of scanning.
+
+### Styles
+
+`!recap <style>` changes the register. Combine with anything else, in any
+order -- `!recap sarcastic 90` and `!recap 90 sarcastic` are the same.
+
+| Style | Reads like |
+|---|---|
+| `funny` | comedy pushed harder, still only jokes that happened |
+| `sarcastic` | dry, deadpan, the friend who warned them (aliases: `sarcasm`, `dry`) |
+| `short` | 150 words, spine only (aliases: `brief`, `tldr`) |
+| `long` | up to 1200 words, scene detail and dialogue (aliases: `detailed`, `full`) |
+| `factual` | no jokes, chronological, plain (aliases: `facts`, `plain`) |
+| `epic` | chronicle/saga register (aliases: `dramatic`, `saga`) |
+| `noir` | hard-boiled, short sentences, world-weary |
+
+`!recap styles` lists them in Discord. Styles are appended to the **system**
+prompt rather than the first pass, because a style set only on the draft
+gets quietly edited back out by the polish pass.
+
+### Personal recaps
+
+`!recap <character>` writes a recap of that character's night -- second
+person, their decisions and spotlight moments, what they specifically
+learned, what's unresolved for them -- and **sends it as a DM**.
+
+```
+!recap Sykth              -> Sykth's night, DM'd to you
+!recap @Justin Llyr       -> Llyr's night, DM'd to Justin
+!recap Thia long          -> the long version
+```
+
+A bare character name DMs *you*; the bot only DMs someone else when you
+mention them, so nobody gets an unexpected DM. If their DMs are closed to
+server members you get told, rather than it failing silently.
+
+Two deliberate differences from a party recap: a personal recap is titled
+differently so it **never becomes the boundary marker** for the next party
+recap, and it resolves its window from the *session start* rather than the
+last recap -- otherwise asking for one after the party recap would hand you
+a recap of the four minutes since.
+
+**"Not enough transcript" usually means "already recapped".** Running
+`!recap` twice in a row hits the boundary from the first one and finds
+almost nothing new -- which is the intended behaviour, not a failure. The
+message says which boundary it used and suggests the `!recap <minutes>`
+override, rather than implying the channel is empty.
+
+### Where the recap gets posted
+
+The recap always goes to the **transcription channel**, wherever you ran the
+command from. If you ran `!recap` somewhere else, the status message in that
+channel ends with "Recap posted in #transcription" so you know where to
+look -- without that, invoking it from another channel looks exactly like
+the bot silently giving up.
+
+The bot reads back its own messages in the transcription channel, strips
+them to plain `Name: line` form, and sends them to **Claude Opus 5** at
+`effort: "max"`. (Chat stays on Haiku 4.5 -- at the table you want a rules
+answer immediately; the recap is written once and read many times, so it's
+worth the better model and the wait.)
+
+The prompts (`claude_caller/claude_caller.py`) tell it the transcript is
+machine-generated -- misheard proper nouns, cut-off sentences, table talk
+mixed in with play -- so it infers names from context and skips the parts
+about pizza. They also ask for **wit**: dry and affectionate, with the
+comedy coming from what actually happened rather than jokes bolted on, and
+accuracy outranking the laugh every time. Output is a "Previously on..."
+narrative, a **Loose threads** bullet list, and **Notable** moments.
+
+### How a recap is built
+
+1. **Map** -- the transcript is split into `SUMMARY_CHUNK_CHARS` (25k
+   characters, ~6k tokens) slices, each summarized in detail on its own.
+   Deliberately small: more, finer passes keep the names and numbers that
+   one broad pass flattens away.
+2. **Reduce** -- the slice summaries are stitched into a single narrative.
+3. **Polish** -- a second pass edits the finished draft for timing and
+   flatness, with the source material alongside it so it can't drift from
+   what happened. Editing sharpens voice far more reliably than asking for
+   accuracy and comedy in one shot.
+
+A single-chunk session skips step 2.
+
+**Measured cost: about $0.58 for a four-hour session** (13k words → 3
+chunks → 5 model calls → 39k input + 15k output tokens). Most of that is
+Opus reasoning, not text. Cost scales with the number of *passes*, not
+session length -- the recap is ~550 words whether the session ran two hours
+or five -- so a longer night costs only slightly more.
+
+Two dials if that's the wrong number for you: `RECAP_EFFORT` (drop to
+`"high"` to roughly halve both the thinking spend and the wait) and
+`RECAP_MODEL` (back to `claude-haiku-4-5` for a ~3-cent recap that reads
+noticeably flatter and returns in seconds).
+
+### It takes minutes, and that's expected
+
+A three-hour session is 5 Opus passes at max effort -- around **8 minutes**
+end to end. The bot posts a status message and edits it after each pass
+(`Recap 3/5: reading part 3 of 3...`) so you can tell it's working rather
+than hung. Drop `RECAP_EFFORT` to `"high"` if you'd rather have it back
+sooner.
+
+### `SUMMARY_MAX_TOKENS` is mostly headroom for thinking
+
+On Opus 5, `max_tokens` caps thinking **plus** response text in one budget.
+At `effort: "max"` on a messy three-hour transcript, reasoning alone can run
+past 16k tokens -- and when it exhausts the budget the API returns HTTP 200
+with a lone thinking block, **no text at all**, and `stop_reason:
+"max_tokens"`. That is not an error you can catch by wrapping the call; it
+looks like a successful response that happens to be empty.
+
+This bit us once: a recap ran for eight minutes, cost real money, logged
+success, and posted nothing. The ceiling is now 32k (the recap itself is
+only ~700 tokens, so nearly all of that is thinking headroom, and unused
+budget costs nothing), and `_complete()` raises on an empty result rather
+than returning `""` for the caller to silently drop.
 
 ## Tuning transcription
 
@@ -174,12 +379,12 @@ All of these take effect on the next bot restart.
 
 ### Latency vs. accuracy (`transcription/audio_sink.py`)
 
-- **`SILENCE_HANG_MS`** (default `400`) -- how long a pause must be before an
+- **`SILENCE_HANG_MS`** (default `900`) -- how long a pause must be before an
   utterance is considered finished and sent to Whisper. **Lower = snappier**
   (transcripts appear sooner) but chops mid-sentence more readily when
   someone pauses to think, which costs Whisper sentence context and can hurt
-  accuracy. Try 300 for a livelier feel, 500-600 if you're seeing sentences
-  split across two messages.
+  accuracy. Try 500-600 for a livelier feel, 1200+ for a DM who narrates in
+  long paragraphs with dramatic pauses.
 - **`MAX_UTTERANCE_MS`** (default `12000`) -- worst-case ceiling: force-flush
   a buffer even without a pause, so a continuous talker still gets chunked
   and transcribed instead of nothing until they stop. Lower for a monologue-
@@ -190,6 +395,45 @@ All of these take effect on the next bot restart.
 - **`SILENCE_RMS_THRESHOLD`** (default `300.0`) -- volume below which audio
   counts as "silence". Raise it if a noisy mic / background hum is stopping
   pauses from ever registering; lower it if quiet talkers get clipped.
+
+### How transcripts get posted (`discord_bot/transcript_writer.py`)
+
+Whisper wants whole sentences, but one Discord message per sentence turns a
+minute of DM narration into a dozen entries. So consecutive utterances from
+the same speaker are coalesced: the first posts immediately, and the ones
+after it *edit that message*, growing it in place. A different speaker, a
+long gap, or Discord's length limit rolls over to a new message.
+
+- **`COALESCE_WINDOW_S`** (default `90.0`) -- how long a speaker's message
+  stays open for more text. Raise it for longer unbroken blocks; lower it if
+  messages feel like they're absorbing things said much later.
+- **`EDIT_DEBOUNCE_S`** (default `2.0`) -- appends are batched into one edit
+  per this many seconds, to stay clear of Discord's edit rate limit. Lower
+  makes text appear more incrementally, at the cost of more API calls.
+- **`MAX_MESSAGE_CHARS`** (default `1900`) -- roll over to a new message
+  before Discord's hard 2000-character limit.
+
+### "Thanks for watching!" and other things nobody said
+
+If a transcript line appears that no one at the table spoke -- classically
+**"Thanks for watching!"**, but also "Thank you.", "Subscribe!", "Bye" --
+that's a *Whisper hallucination*, not a stray listener. Whisper was trained
+on a huge amount of YouTube audio paired with its subtitles, so a segment
+containing no real speech (a breath, a chair creak, hiss that slipped past
+VAD) gets captioned with the most likely text for that kind of audio: a
+video outro. The model generated it from noise; nothing was overheard.
+
+Three defenses are in place, all in `transcription/transcriber.py`:
+
+- `vad_filter=True` drops non-speech before it ever reaches the decoder.
+- `no_speech_threshold` / `log_prob_threshold` / `compression_ratio_threshold`
+  discard segments the model is unsure of, and ones that look like a
+  repetition loop.
+- `_HALLUCINATION_PHRASES` drops an utterance whose *entire* text is a known
+  phantom phrase. Only exact whole-utterance matches are removed, so "thanks
+  for watching the door" survives. Add to this set if your table sees other
+  phantom lines; remove the short entries (`"okay"`, `"so"`, `"you"`) if you
+  find genuine one-word replies going missing.
 
 ### Model quality / speed (`.env`)
 
@@ -206,10 +450,43 @@ All of these take effect on the next bot restart.
 
 ### Accuracy, above all else
 
-Keep `CAMPAIGN_VOCAB` current. Adding your table's proper nouns (PCs, NPCs,
-locations, homebrew spells) does more for perceived accuracy than any of the
-knobs above -- it's the difference between "Eldritch Blast" and "elder itch
-blast."
+Keep **`campaign_vocab.txt`** current. Adding your table's proper nouns (PCs,
+NPCs, locations, homebrew spells) does more for perceived accuracy than any
+of the knobs above -- it's the difference between "Vesper Kane" and "Whisper
+Cain."
+
+One term per line, `#` for comments, blank lines ignored; commas on a line
+work too, so an old `CAMPAIGN_VOCAB` value pastes straight in. The file lives
+next to `main.py`; point `CAMPAIGN_VOCAB_FILE` elsewhere if you'd rather.
+`CAMPAIGN_VOCAB` in `.env` still works and is merged in.
+
+**This is a hard budget, and it is smaller than it looks.** Whisper's
+`initial_prompt` is capped at **223 tokens** -- half its 448-token decoder
+context. Go over and faster-whisper doesn't error: it silently keeps the
+*last* 223 tokens and drops the rest off the front. The built-in 5e glossary
+alone measured 316 tokens, so before this was handled roughly 30 core terms
+were being discarded every session without a word about it.
+
+`build_prompt()` now budgets deliberately:
+
+- **Campaign terms get first claim.** A general speech model already knows
+  what a Paladin is; it has no idea about "the Sunken Archive."
+- **Core 5e terms fill what's left**, trimmed from the end, logged at INFO.
+- **Campaign terms are placed last** in the prompt, so if anything still
+  overflows, truncation-from-the-front eats the generic vocabulary first.
+- **If the campaign glossary alone overflows**, the leading entries are kept
+  and a WARNING names every dropped term. Entries near the top of the file
+  win, so put your most-said, most-mangled names first.
+
+In practice that leaves room for roughly **30-40 short campaign terms**.
+Prune names that stop coming up rather than letting the list grow.
+
+> Whisper is **fully local** -- `faster-whisper` loads `large-v3` into VRAM
+> once and every utterance after that is GPU inference on your machine. The
+> only network traffic is a one-time model cache check with HuggingFace when
+> the model loads. "Prompt" and "tokens" here refer to the local decoder's
+> conditioning string, not an API call: transcription costs nothing and
+> sends nothing off the box. The only paid API calls are chat and recaps.
 
 ## Ideas for where to take it next
 

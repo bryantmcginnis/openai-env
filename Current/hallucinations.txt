@@ -1,0 +1,56 @@
+# ============================================================================
+# PHANTOM PHRASES
+# ============================================================================
+# Lines Whisper invents out of silence. Add anything your table sees that
+# nobody actually said, one phrase per line. # starts a comment.
+#
+# WHY THIS HAPPENS
+#   Whisper was trained on a mountain of YouTube audio paired with its
+#   subtitles. Handed a segment with no real speech in it -- a breath, a
+#   chair creak, hiss that slipped past the voice-activity filter -- the
+#   likeliest caption it knows for that kind of audio is a video outro. So
+#   it writes one. Nobody said it; nobody is listening. It is generated from
+#   noise.
+#
+# HOW MATCHING WORKS
+#   The filter SUBTRACTS rather than matches: every known phrase is stripped
+#   out of the line, and if all that's left is filler ("and", "so", "okay"),
+#   the whole line is dropped. That means you don't need to list every
+#   combination -- "thank you for watching" plus "see you in the next video"
+#   already covers "Thank you for watching and I'll see you in the next
+#   video" on its own.
+#
+#   Real speech survives, because subtracting a phantom from it leaves
+#   something behind: "thanks for watching the door" keeps "the door".
+#
+# WHAT TO ADD
+#   Only phrases that are ENTIRE phantom utterances. Punctuation and case
+#   are ignored, so write it however you like.
+#
+# WHAT NOT TO ADD
+#   Anything that could be a real sentence at your table. A phrase here can
+#   never be rescued by context -- if you add "attack", every line that is
+#   only the word "attack" disappears for good.
+#
+# The built-in list (transcription/transcriber.py) already covers the common
+# ones: thanks for watching, thank you, subscribe, bye, you, so, okay, and
+# the Amara/CastingWords subtitle credits. This file is for the rest.
+#
+# Takes effect on the next bot restart.
+# ============================================================================
+
+# Seen at this table:
+Thank you for watching and I'll see you in the next video
+Thanks for watching! 
+Thank you for listening.
+Subtitles by the Amara.org community
+
+
+# Other common ones -- uncomment if they show up:
+# I'll see you in the next one
+# Thanks for watching, don't forget to subscribe
+# Please subscribe to my channel
+# Transcribed by ESO, translated by ---
+# The End
+# Copyright 2023
+# You're welcome
