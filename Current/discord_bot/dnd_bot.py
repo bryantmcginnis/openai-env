@@ -128,6 +128,12 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.NotOwner):
+        # Deliberately no detail beyond this -- don't confirm or deny who
+        # the owner is to someone who isn't them.
+        await ctx.send("That command is restricted to the bot's owner.")
+        return
+
     # py-cord's default handler for this prints straight to stderr with no
     # timestamp (discord/ext/commands/bot.py) -- route it through logging
     # instead so failures like a broken !record are dated in bot.log.
@@ -178,6 +184,51 @@ async def forget(ctx: commands.Context):
     """Clears the assistant's memory of this channel's conversation."""
     claude.reset(ctx.channel.id)
     await ctx.send("Cleared my memory of this channel.")
+
+
+@bot.command(name="shutdown", aliases=["sleep", "die"])
+@commands.is_owner()
+async def shutdown(ctx: commands.Context):
+    """Stops the bot process entirely. Owner only.
+
+    Restricted via py-cord's is_owner() check, which resolves against
+    whoever owns the Discord *application* in the Developer Portal -- your
+    account specifically, not a server role or permission. A server admin
+    granting themselves every role still can't run this; only you can.
+
+    Works from a DM, which is the point: you don't need to still have the
+    console window open, or even be in the server, to be sure nobody else
+    is running your Claude API key or Discord token after you've stepped
+    away.
+    """
+    # If we're mid-recording anywhere, stop capturing audio *before*
+    # anything else. That's the actual security-sensitive bit here -- an
+    # extra few seconds spent trying to post a graceful recap first is a
+    # few more seconds the bot (and your API key) stays live, which is
+    # exactly what this command exists to avoid. The transcript already
+    # written to the channel isn't lost -- `!recap` after the next restart
+    # picks it up the same way it does after any other restart.
+    stopped_in: list[str] = []
+    for guild in list(bot.guilds):
+        voice_client = guild.voice_client
+        if voice_client is not None and voice_client.is_connected():
+            if guild.id in _active_recordings:
+                voice_client.stop_recording()
+                _active_recordings.discard(guild.id)
+            await voice_client.disconnect(force=True)
+            stopped_in.append(guild.name)
+
+    note = (
+        f" Was recording in {', '.join(stopped_in)} -- stopped. "
+        f"Run `!recap` after restarting to summarize it."
+        if stopped_in else ""
+    )
+    _log.warning("shutdown requested by %s (id %s).%s", ctx.author, ctx.author.id, note)
+    await ctx.send(
+        f"Shutting down.{note}"
+        + " Restart from the desktop shortcut when you're back."
+    )
+    await bot.close()
 
 
 @bot.command()
