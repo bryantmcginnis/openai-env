@@ -143,7 +143,14 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    await bot.process_commands(message)
+    # Resolve the command first and stop there if it is one. The old order
+    # ran process_commands() and then *also* fell through to the chat path,
+    # so a "!recap" typed in a DM ran the command and separately asked
+    # Claude what "!recap" meant -- two replies, one of them nonsense.
+    ctx = await bot.get_context(message)
+    if ctx.valid:
+        await bot.invoke(ctx)
+        return
 
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mention = bot.user in message.mentions
@@ -195,6 +202,51 @@ async def roll(ctx: commands.Context, *, expression: str = ""):
 # Voice: !record joins your voice channel and transcribes it live to the
 # #transcription channel; !stoprecording leaves.
 # ---------------------------------------------------------------------------
+
+async def _resolve_guild(ctx: commands.Context) -> discord.Guild | None:
+    """Work out which server a DM'd command is about.
+
+    In a DM ctx.guild is None, so anything that reads guild state has to
+    find one. Preference order: servers we share with the caller, narrowed
+    to those that actually have a transcription channel, and if that still
+    leaves a choice, whichever has the most recent transcript -- which is
+    almost always the table they just played at.
+    """
+    if ctx.guild is not None:
+        return ctx.guild
+
+    shared = [g for g in bot.guilds if g.get_member(ctx.author.id)]
+    candidates = [g for g in shared if _find_transcription_channel(g)]
+    if not candidates:
+        await ctx.send(
+            f"I can't find a `#{TRANSCRIPTION_CHANNEL_NAME}` channel in any "
+            f"server we share, so there's nothing for me to read."
+        )
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Several tables -- pick the one that was used most recently.
+    newest, newest_at = None, None
+    for guild in candidates:
+        channel = _find_transcription_channel(guild)
+        try:
+            async for message in channel.history(limit=20):
+                if _is_transcript_line(message):
+                    if newest_at is None or message.created_at > newest_at:
+                        newest, newest_at = guild, message.created_at
+                    break
+        except discord.HTTPException:
+            continue
+    if newest is None:
+        await ctx.send(
+            "We share several servers and none of them have any transcript "
+            "yet -- run the command in the server you mean."
+        )
+        return None
+    _log.info("DM command resolved to guild %r (most recent transcript)", newest.name)
+    return newest
+
 
 def _find_transcription_channel(guild: discord.Guild) -> discord.TextChannel | None:
     return discord.utils.get(guild.text_channels, name=TRANSCRIPTION_CHANNEL_NAME)
@@ -254,6 +306,12 @@ async def _handle_utterance(
 @bot.command()
 async def record(ctx: commands.Context):
     """Joins your voice channel and transcribes speech to the transcription channel."""
+    if ctx.guild is None:
+        await ctx.send(
+            "Run this one in the server -- I need to see which voice channel "
+            "you're in, and a DM doesn't tell me that."
+        )
+        return
     if ctx.author.voice is None or ctx.author.voice.channel is None:
         await ctx.send("Join a voice channel first.")
         return
@@ -347,6 +405,12 @@ async def record(ctx: commands.Context):
 @bot.command()
 async def stoprecording(ctx: commands.Context):
     """Stops transcribing, leaves the voice channel, and posts a session recap."""
+    if ctx.guild is None:
+        await ctx.send(
+            "Run this one in the server -- I need to see which voice channel "
+            "you're in, and a DM doesn't tell me that."
+        )
+        return
     voice_client = ctx.guild.voice_client
     if voice_client is None or not voice_client.is_connected():
         await ctx.send("Not currently recording.")
@@ -445,7 +509,10 @@ async def recap(ctx: commands.Context, *, args: str = ""):
     elif focus:
         target = ctx.author
 
-    text_channel = _find_transcription_channel(ctx.guild)
+    guild = await _resolve_guild(ctx)
+    if guild is None:
+        return  # _resolve_guild has already explained why
+    text_channel = _find_transcription_channel(guild)
     if text_channel is None:
         await ctx.send(f"No `#{TRANSCRIPTION_CHANNEL_NAME}` channel to read.")
         return
@@ -562,6 +629,28 @@ async def _collect_transcript(text_channel: discord.TextChannel, since: datetime
     return "\n".join(lines)
 
 
+async def _say(status: discord.Message, ctx: commands.Context, content: str) -> None:
+    """Report to the user without assuming the network is up.
+
+    The failure this exists for: a recap died because the machine dropped
+    off wifi, the handler tried to edit the status message to say so, and
+    *that* call raised too -- so the error handler became the error, and the
+    user saw nothing at all. Reporting a network failure over the network
+    needs a fallback and a shrug.
+    """
+    for attempt in (0, 1):
+        try:
+            await status.edit(content=content)
+            return
+        except discord.HTTPException:
+            if attempt == 0:
+                await asyncio.sleep(5)  # a reconnect is often seconds away
+    try:
+        await ctx.send(content)
+    except discord.HTTPException:
+        _log.error("could not report to Discord at all: %s", content)
+
+
 async def _post_recap(
     ctx: commands.Context,
     text_channel: discord.TextChannel,
@@ -628,7 +717,13 @@ async def _post_recap(
         )
     except Exception as exc:
         _log.error("session recap failed", exc_info=exc)
-        await status.edit(content=f"Couldn't generate the recap: {exc}")
+        await _say(
+            status, ctx,
+            f"Couldn't generate the recap: {exc}"
+            f"\nThe transcript is still in #{text_channel.name} -- "
+            "run `!recap` again once you are back online and it will "
+            "pick up the same session.",
+        )
         return
 
     # Belt and braces: _complete already rejects empty output, but an empty
@@ -637,7 +732,7 @@ async def _post_recap(
     # disappeared silently.
     if not summary.strip():
         _log.error("recap came back empty from %d chars of transcript", len(transcript))
-        await status.edit(content="The recap came back empty -- nothing posted. Check bot.log.")
+        await _say(status, ctx, "The recap came back empty -- nothing posted. Check bot.log.")
         return
 
     # Every chunk carries the title, so any of them works as the boundary

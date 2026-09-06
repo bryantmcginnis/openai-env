@@ -1,9 +1,29 @@
+import logging
+import time
 from collections import defaultdict, deque
 
 import anthropic
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_log = logging.getLogger(__name__)
+
+# Network failures worth retrying. httpx.HTTPError is the one that actually
+# bit us -- a RemoteProtocolError ("peer closed connection without sending
+# complete message body") raised mid-stream when the machine changed
+# network. It escapes the SDK unwrapped, so catching only anthropic.* misses
+# it entirely.
+RETRYABLE = (
+    httpx.HTTPError,
+    anthropic.APIConnectionError,
+    anthropic.RateLimitError,
+    anthropic.InternalServerError,
+)
+RETRY_ATTEMPTS = 4
+# Generous, because the usual cause is a human reconnecting to wifi.
+RETRY_BACKOFF_S = (5, 20, 45)
 
 MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 1024
@@ -246,7 +266,7 @@ class ClaudeChatCaller:
 
     # -- session recaps -----------------------------------------------------
 
-    def _complete(self, system: str, prompt: str, max_tokens: int) -> str:
+    def _complete(self, system: str, prompt: str, max_tokens: int, notify=None) -> str:
         """One-shot recap call with no conversation history attached.
 
         Runs on Opus with adaptive thinking. `fallbacks="default"` re-runs
@@ -254,7 +274,35 @@ class ClaudeChatCaller:
         safety classifiers decline it -- a D&D transcript is wall-to-wall
         described violence, so an occasional false positive is plausible and
         this turns it into a slightly different recap rather than a failure.
+
+        Retries transient network failures itself. The SDK's own retries
+        cover a request that fails to *start*, but not one that dies partway
+        through reading the response body -- and at effort="max" the body
+        takes minutes to arrive, which is a wide window for a laptop to
+        change wifi. A dropped connection three passes in would otherwise
+        throw away every completed pass.
         """
+        last_error: Exception | None = None
+        for attempt in range(RETRY_ATTEMPTS):
+            if attempt:
+                delay = RETRY_BACKOFF_S[min(attempt - 1, len(RETRY_BACKOFF_S) - 1)]
+                _log.warning(
+                    "recap pass failed (%s: %s); retry %d/%d in %ds",
+                    type(last_error).__name__, last_error, attempt, RETRY_ATTEMPTS - 1, delay,
+                )
+                if notify is not None:
+                    notify(f"connection lost, retrying in {delay}s")
+                time.sleep(delay)
+            try:
+                return self._attempt(system, prompt, max_tokens)
+            except RETRYABLE as exc:
+                last_error = exc
+        raise RuntimeError(
+            f"gave up after {RETRY_ATTEMPTS} attempts -- last error: "
+            f"{type(last_error).__name__}: {last_error}"
+        ) from last_error
+
+    def _attempt(self, system: str, prompt: str, max_tokens: int) -> str:
         # Streamed because max_tokens is well above the ~16k point where a
         # non-streaming request risks an HTTP timeout, and these calls
         # genuinely run for minutes at effort="max".
@@ -335,6 +383,11 @@ class ClaudeChatCaller:
             if on_progress is not None:
                 on_progress(done, total, label)
 
+        def notify(label: str) -> None:
+            """Surface a retry in Discord rather than looking frozen."""
+            if on_progress is not None:
+                on_progress(done, total, label)
+
         first_pass = FOCUS_PROMPT if focus else RECAP_PROMPT
 
         if len(chunks) == 1:
@@ -343,6 +396,7 @@ class ClaudeChatCaller:
                 system,
                 first_pass.format(transcript=chunks[0], name=focus or ""),
                 SUMMARY_MAX_TOKENS,
+                notify,
             )
             evidence = chunks[0]
         else:
@@ -357,6 +411,7 @@ class ClaudeChatCaller:
                         system,
                         PARTIAL_PROMPT.format(part=index + 1, total=len(chunks), transcript=chunk),
                         SUMMARY_MAX_TOKENS,
+                        notify,
                     )
                 )
 
@@ -368,7 +423,7 @@ class ClaudeChatCaller:
                 if focus
                 else COMBINE_PROMPT.format(partials=evidence)
             )
-            draft = self._complete(system, combine, SUMMARY_MAX_TOKENS)
+            draft = self._complete(system, combine, SUMMARY_MAX_TOKENS, notify)
 
         # Polish: a second pass over the finished draft. Editing beats
         # first-drafting for voice, and the polish pass is given the source
@@ -378,6 +433,7 @@ class ClaudeChatCaller:
             system,
             POLISH_PROMPT.format(transcript=evidence, draft=draft),
             SUMMARY_MAX_TOKENS,
+            notify,
         )
 
 
