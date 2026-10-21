@@ -47,10 +47,10 @@ Subtitles by the Amara.org community
 
 
 # Other common ones -- uncomment if they show up:
-# I'll see you in the next one
+I'll see you in the next one
 # Thanks for watching, don't forget to subscribe
-# Please subscribe to my channel
+Please subscribe to my channel
 # Transcribed by ESO, translated by ---
 # The End
 # Copyright 2023
-# You're welcome
+You're welcome
