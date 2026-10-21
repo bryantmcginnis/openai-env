@@ -145,8 +145,22 @@ taskbar*, or find "D&D Bot" in the Start app list → *Pin to Start*.
 > the **taskbar** unless its target is an executable -- aim it at the `.bat`
 > and you get something that pins to Start but not the taskbar.
 
-`bot.log` is written by the bot itself (rotating, 5 MB × 3), so it exists
-however you started it -- no shell redirection needed.
+The bot writes its own logs, so they exist however you started it -- no
+shell redirection needed:
+
+- **`bot.log`** -- everything, rotating at 5 MB × 3.
+- **`bot_events.log`** -- only warnings, errors and session milestones
+  (recording started/stopped, recap posted, audio stalled/recovered),
+  rotating at 1 MB × 5. This is the one to read after a bad night: it holds
+  weeks of timeline, and a flood in `bot.log` can't push it out.
+
+A repeated warning or error is logged in full once, then counted, with one
+summary line every 30 s (`suppressed 1874 more of [ERROR] ...`). That's
+because on 2026-10-14 the voice receiver logged a traceback for every
+undecryptable packet -- about 60 a second -- and its 20 MB of rotation
+filled in six minutes, overwriting the hour that would have shown what
+broke. INFO lines, including every transcribed utterance, are never
+throttled. See `log_setup.py`.
 
 ### From a terminal
 
@@ -312,8 +326,8 @@ look -- without that, invoking it from another channel looks exactly like
 the bot silently giving up.
 
 The bot reads back its own messages in the transcription channel, strips
-them to plain `Name: line` form, and sends them to **Claude Opus 5** at
-`effort: "max"`. (Chat stays on Haiku 4.5 -- at the table you want a rules
+them to plain `Name: line` form, and sends them to **Claude Opus 5.5** at
+`effort: "high"`. (Chat stays on Haiku -- at the table you want a rules
 answer immediately; the recap is written once and read many times, so it's
 worth the better model and the wait.)
 
@@ -339,39 +353,117 @@ narrative, a **Loose threads** bullet list, and **Notable** moments.
 
 A single-chunk session skips step 2.
 
-**Measured cost: about $0.58 for a four-hour session** (13k words → 3
-chunks → 5 model calls → 39k input + 15k output tokens). Most of that is
-Opus reasoning, not text. Cost scales with the number of *passes*, not
-session length -- the recap is ~550 words whether the session ran two hours
-or five -- so a longer night costs only slightly more.
+**Measured cost on Opus 5.5 ($4 / $20 per million tokens):**
 
-Two dials if that's the wrong number for you: `RECAP_EFFORT` (drop to
-`"high"` to roughly halve both the thinking spend and the wait) and
-`RECAP_MODEL` (back to `claude-haiku-4-5` for a ~3-cent recap that reads
-noticeably flatter and returns in seconds).
+| Load | Passes | Tokens (in + out) | Cost | Time |
+|---|---|---|---|---|
+| A real captured session, 20k characters | 2 | 18k + 6k | **$0.19** | 54 s |
+| A 13k-word, ~4-hour session | 5 | 41k + 15k | **$0.47** | 145 s |
+
+Most of that is reasoning, not text. Cost scales with the number of
+*passes*, not session length -- the recap is ~550 words whether the session
+ran two hours or five -- so a longer night costs only slightly more.
+
+Two dials if that's the wrong number for you: `RECAP_EFFORT` (`"medium"` is
+about 40% cheaper and a little flatter -- measured $0.07 vs $0.11 on a small
+sample) and `RECAP_MODEL` in `.env` (`latest-haiku` gives a recap in about 25
+seconds for around a cent, but it reads noticeably flatter). See
+[choosing models](#choosing-models).
+
+> **Don't set `RECAP_EFFORT = "max"` on Opus 5.5.** It exhausted the entire
+> 32,000-token budget on reasoning and wrote nothing, 3 runs out of 3, even
+> on a 326-word transcript (Opus 5 used ~1,600 tokens for the same pass).
+> Each failed pass costs ~$0.64. See below.
 
 ### It takes minutes, and that's expected
 
-A three-hour session is 5 Opus passes at max effort -- around **8 minutes**
-end to end. The bot posts a status message and edits it after each pass
-(`Recap 3/5: reading part 3 of 3...`) so you can tell it's working rather
-than hung. Drop `RECAP_EFFORT` to `"high"` if you'd rather have it back
-sooner.
+A long session is up to 5-8 Opus passes at high effort -- around **2-3
+minutes** end to end. The bot posts a status message and edits it after each
+pass (`Recap 3/5: reading part 3 of 3...`) so you can tell it's working
+rather than hung.
 
 ### `SUMMARY_MAX_TOKENS` is mostly headroom for thinking
 
-On Opus 5, `max_tokens` caps thinking **plus** response text in one budget.
-At `effort: "max"` on a messy three-hour transcript, reasoning alone can run
-past 16k tokens -- and when it exhausts the budget the API returns HTTP 200
-with a lone thinking block, **no text at all**, and `stop_reason:
-"max_tokens"`. That is not an error you can catch by wrapping the call; it
-looks like a successful response that happens to be empty.
+`max_tokens` caps thinking **plus** response text in one budget. When
+reasoning exhausts it, the API returns HTTP 200 with a lone thinking block,
+**no text at all**, and `stop_reason: "max_tokens"`. That is not an error you
+can catch by wrapping the call; it looks like a successful response that
+happens to be empty.
 
-This bit us once: a recap ran for eight minutes, cost real money, logged
-success, and posted nothing. The ceiling is now 32k (the recap itself is
-only ~700 tokens, so nearly all of that is thinking headroom, and unused
-budget costs nothing), and `_complete()` raises on an empty result rather
-than returning `""` for the caller to silently drop.
+`_attempt()` checks for it and raises, so an empty result becomes a readable
+failure instead of a recap that silently never appears. The ceiling is 32k
+(the recap itself is only ~700 tokens, so nearly all of that is thinking
+headroom, and unused budget costs nothing). It is a safety net, not a
+target: on Opus 5.5 at `effort: "max"` it is exactly what gets exhausted,
+which is why the default is `"high"`.
+
+## Choosing models
+
+Set in `.env`:
+
+```
+CHAT_MODEL=latest-haiku
+RECAP_MODEL=claude-opus-5-5
+```
+
+Each takes either a **pinned model ID** (`claude-opus-5-5`), which never
+changes underneath you, or **`latest-<family>`** (`latest-haiku`,
+`latest-sonnet`, `latest-opus`), which uses the newest model of that family
+the API offers. The API has no floating "latest" alias of its own -- a
+dateless ID like `claude-haiku-5-5` is a fixed snapshot -- so the bot looks
+it up once at startup and logs what it picked:
+
+```
+chat model: claude-haiku-5-5 (from 'latest-haiku') | recap model: claude-opus-5-5 (from 'claude-opus-5-5')
+```
+
+If the API can't be reached at startup, `latest-` settings fall back to a
+known model rather than failing. Request settings like effort and adaptive
+thinking are only sent to models that support them, so pinning an older
+model (e.g. `claude-haiku-4-5`) still works.
+
+**Why the recap is pinned and chat isn't.** A new model version can behave
+differently under the same settings. Moving the recap from Opus 5 to Opus 5.5
+at the same `effort: "max"` made every recap fail: the model spent its
+whole 32k-token budget thinking and wrote nothing (3 runs out of 3, ~$0.64
+each). Chat has almost nothing to tune, so following the newest Haiku is
+safe; for the recap, change `RECAP_MODEL` deliberately and run a test recap.
+Changes take effect on the next bot start.
+
+## When the transcript stalls
+
+On 2026-10-14 the bot stopped transcribing 32 minutes into a session and
+nobody knew until the recap came out short 77 minutes later. It hadn't
+crashed: it was still in voice, receiving everyone's audio, and failing to
+decrypt every packet. py-cord's receiver drops packets it can't decrypt
+without counting them or telling anyone, and it builds its decryptor once,
+from the voice key at the start of recording -- its `update_secret_key()`
+exists but nothing calls it -- so if the voice session is re-keyed
+mid-recording, every packet after that fails. That's the leading theory;
+the logs that would prove it were lost to the flood described above.
+
+`discord_bot/voice_health.py` now watches every recording. If packets keep
+arriving for 15 s and none of them decrypt, it escalates, and never repeats
+a visible step within one recording:
+
+1. **Re-sync the decryption key** from the live voice connection. Silent and
+   instant. If a stale key was the cause, this is the whole fix, and nobody
+   is bothered -- it's noted in `bot_events.log`.
+2. **One full voice rejoin**, announced in the channel where `!record` was
+   typed *and* in `#transcripts` (the table mutes transcripts, so an alert
+   only there would go unseen):
+   > ⚠️ **Transcription problem:** I've been hearing the voice channel since
+   > 21:03 but can't decode the audio... Rejoining voice to fix it.
+
+   The same transcript continues afterwards. If audio comes back, that
+   message is edited in place to ✅ with the gap's start and end times.
+3. **If it doesn't come back, or it stalls again later that recording,** one
+   ❌ message says what to run, and the bot stops trying, so the table gets
+   one clear message rather than a stream of them.
+
+A quiet table never trips it -- silence sends no packets, so there's
+nothing failing. Two stalls in one recording cost at most two posts and one
+edit.
 
 ## Tuning transcription
 
@@ -530,8 +622,9 @@ and the shims can likely be retired.
 
 ## Cost note
 
-Chat runs on Claude Haiku 4.5 (~$1/$5 per million tokens) -- cheap for
-hobby use. Transcription runs entirely locally via `faster-whisper`, so it
+Chat runs on the newest Claude Haiku (Haiku 5.5: from $0.10/$0.50 per
+million tokens) -- effectively free for hobby use. Recaps cost cents per
+session; see [session recaps](#session-recaps). Transcription runs entirely locally via `faster-whisper`, so it
 costs nothing per minute of audio but does use your CPU/GPU while
 recording.
 

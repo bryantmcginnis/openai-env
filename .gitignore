@@ -57,6 +57,7 @@ cover/
 
 # Django stuff:
 *.log
+*.log.[0-9]*
 
 # Debug audio dumps (Current/discord_bot/dnd_bot.py, temporary)
 debug_audio/

@@ -6,6 +6,7 @@ import datetime
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 # import time  # only used by the disabled _dump_debug_wav helper
 # import wave  # only used by the disabled _dump_debug_wav helper
 
@@ -14,7 +15,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from claude_caller.claude_caller import RECAP_STYLES, ClaudeChatCaller, resolve_style
-from discord_bot import dice
+from discord_bot import dice, voice_health
 from discord_bot.transcript_writer import TranscriptWriter
 from transcription.audio_sink import UtteranceSink
 from transcription.dnd_vocabulary import build_recap_briefing
@@ -23,6 +24,9 @@ from transcription.transcriber import Transcriber
 load_dotenv()
 
 _log = logging.getLogger(__name__)
+# Session milestones. Goes to bot_events.log as well as bot.log, so the
+# timeline of a night survives even if bot.log gets flooded (log_setup.py).
+_events = logging.getLogger("dndbot.events")
 
 # Debugging aid (disabled): directory for per-utterance WAV dumps. See the
 # commented _dump_debug_wav helper and its call in _handle_utterance.
@@ -208,6 +212,8 @@ async def shutdown(ctx: commands.Context):
     # exactly what this command exists to avoid. The transcript already
     # written to the channel isn't lost -- `!recap` after the next restart
     # picks it up the same way it does after any other restart.
+    for cap in list(_captures.values()):
+        cap.stop_watchdog()
     stopped_in: list[str] = []
     for guild in list(bot.guilds):
         voice_client = guild.voice_client
@@ -354,6 +360,168 @@ async def _handle_utterance(
     await writer.add(user_id, display_name, text)
 
 
+@dataclass
+class _Capture:
+    """One recording session: everything a self-heal rejoin has to carry over.
+
+    The voice connection and py-cord's reader are replaceable; the transcript
+    writer, channels and watchdog are not, so a rejoin keeps writing into the
+    same transcript messages instead of starting the night over.
+    """
+
+    guild: discord.Guild
+    voice_channel: discord.abc.Connectable
+    transcripts: discord.TextChannel
+    chat: discord.abc.Messageable  # where !record was typed -- where people are looking
+    writer: TranscriptWriter
+    loop: asyncio.AbstractEventLoop
+    health: voice_health.CaptureHealth = field(default_factory=voice_health.CaptureHealth)
+    sink: UtteranceSink | None = None
+    watchdog: asyncio.Task | None = None
+
+    def stop_watchdog(self) -> None:
+        # Safe from py-cord's audio thread as well as the event loop.
+        if self.watchdog is not None:
+            self.loop.call_soon_threadsafe(self.watchdog.cancel)
+
+
+_captures: dict[int, _Capture] = {}
+
+
+async def _arm_dave_passthrough(voice_client: discord.VoiceClient) -> None:
+    # py-cord only calls DaveSession.set_passthrough_mode() during an
+    # explicit DAVE protocol transition (discord/voice/state.py); joining a
+    # channel where DAVE is already fully engaged never triggers one, so any
+    # participant whose client sends unencrypted audio gets every packet
+    # rejected with "DecryptionFailed(UnencryptedWhenPassthroughDisabled)"
+    # for the entire session. We don't need DAVE's E2EE guarantee -- we're
+    # already a channel member with full audio access -- so force it on.
+    dave_session = getattr(voice_client._connection, "dave_session", None)
+    _log.info("dave_session at record start: %r", dave_session)
+    if dave_session is not None:
+        # The DAVE session's MLS key exchange happens asynchronously over
+        # the gateway *after* connect() returns, so it's still INACTIVE /
+        # not ready right here -- setting passthrough mode on it now gets
+        # discarded once the real handshake completes. Wait for it to
+        # actually go ready before arming passthrough. py-cord's own calls
+        # always pass a numeric expiry (120, 10) in discord/voice/state.py,
+        # never None, so None likely doesn't mean "no expiry" -- use a
+        # duration long enough to cover a whole session.
+        for _ in range(50):  # up to ~5s
+            if dave_session.ready:
+                break
+            await asyncio.sleep(0.1)
+        dave_session.set_passthrough_mode(True, 3600)
+        _log.info(
+            "set_passthrough_mode(True, 3600) called; status=%r ready=%r",
+            dave_session.status, dave_session.ready,
+        )
+
+
+async def _start_capture(cap: _Capture) -> None:
+    """Join cap.voice_channel and start recording into cap.writer."""
+    voice_client = await cap.voice_channel.connect()
+    await _arm_dave_passthrough(voice_client)
+
+    async def on_utterance(user_id: int, pcm_bytes: bytes):
+        await _handle_utterance(cap.guild, cap.writer, user_id, pcm_bytes)
+
+    sink = UtteranceSink(cap.loop, on_utterance)
+    # py-cord 2.8.0 no longer calls sink.init() itself anywhere in the voice
+    # module -- without this, self.sink.client stays None and PacketDecoder
+    # crashes looking up the speaking member.
+    sink.init(voice_client)
+    cap.sink = sink
+    voice_client.start_recording(sink, _make_finished_callback(cap, sink))
+    voice_health.instrument(cap.health, voice_client)
+
+
+def _make_finished_callback(cap: _Capture, sink: UtteranceSink):
+    def on_recording_finished(exception: Exception | None):
+        # Runs on py-cord's audio thread; hop back to the event loop for cleanup.
+        if cap.sink is not sink:
+            # A self-heal rejoin replaced this recording -- the session goes on.
+            return
+        _active_recordings.discard(cap.guild.id)
+        _captures.pop(cap.guild.id, None)
+        cap.stop_watchdog()
+        # The sink flushes any half-finished utterance during cleanup, so
+        # close the writer behind it rather than here, once those have been
+        # transcribed and appended.
+        asyncio.run_coroutine_threadsafe(_close_writer(cap.guild.id), cap.loop)
+        if exception:
+            asyncio.run_coroutine_threadsafe(
+                cap.chat.send(f"Recording stopped with an error: {exception}"), cap.loop
+            )
+
+    return on_recording_finished
+
+
+async def _rejoin(cap: _Capture) -> bool:
+    """Leave and rejoin voice, carrying the session over. True if recording again."""
+    # Detach first, so the old recording's finished callback leaves the
+    # session alone instead of closing the transcript.
+    cap.sink = None
+    old = cap.guild.voice_client
+    try:
+        if old is not None:
+            if old.is_recording():
+                old.stop_recording()  # flushes buffered speech into the same transcript
+            await old.disconnect(force=True)
+        await asyncio.sleep(2)
+        await _start_capture(cap)
+        _events.warning("rejoined voice in %s / %s", cap.guild.name, cap.voice_channel.name)
+        return True
+    except Exception as exc:
+        _events.error("voice rejoin failed in %s", cap.guild.name, exc_info=exc)
+        # Nothing is recording now. Clear the session so `!record` works again
+        # rather than answering "Already recording".
+        _active_recordings.discard(cap.guild.id)
+        _captures.pop(cap.guild.id, None)
+        asyncio.create_task(_close_writer(cap.guild.id))
+        return False
+
+
+def _alert_channels(cap: _Capture) -> list:
+    # Chat first: the table mutes the transcripts channel because of how much
+    # the bot posts there, so an alert only there would go unseen. Never let
+    # an alert start with "**" -- that's how transcript lines are recognised.
+    channels = [cap.chat]
+    if getattr(cap.chat, "id", None) != cap.transcripts.id:
+        channels.append(cap.transcripts)
+    return channels
+
+
+async def _post_alert(cap: _Capture, text: str) -> list:
+    sent = []
+    for channel in _alert_channels(cap):
+        try:
+            sent.append(await channel.send(text))
+        except discord.HTTPException as exc:
+            _events.warning("could not post alert in %s: %s", getattr(channel, "name", channel), exc)
+    return sent
+
+
+async def _edit_alert(sent: list, text: str) -> None:
+    for message in sent or []:
+        try:
+            await message.edit(content=text)
+        except discord.HTTPException as exc:
+            _events.warning("could not update alert: %s", exc)
+
+
+def _start_watchdog(cap: _Capture) -> None:
+    watchdog = voice_health.Watchdog(
+        cap.health,
+        get_voice_client=lambda: cap.guild.voice_client,
+        rejoin=lambda: _rejoin(cap),
+        notify=lambda text: _post_alert(cap, text),
+        update=_edit_alert,
+        guild_name=cap.guild.name,
+    )
+    cap.watchdog = asyncio.create_task(watchdog.run())
+
+
 @bot.command()
 async def record(ctx: commands.Context):
     """Joins your voice channel and transcribes speech to the transcription channel."""
@@ -384,67 +552,34 @@ async def record(ctx: commands.Context):
         await ctx.send("Loading the transcription model for the first time, hang on...")
     transcriber = await asyncio.to_thread(get_transcriber)
 
-    voice_client = await ctx.author.voice.channel.connect()
-
-    # py-cord only calls DaveSession.set_passthrough_mode() during an
-    # explicit DAVE protocol transition (discord/voice/state.py); joining a
-    # channel where DAVE is already fully engaged never triggers one, so any
-    # participant whose client sends unencrypted audio gets every packet
-    # rejected with "DecryptionFailed(UnencryptedWhenPassthroughDisabled)"
-    # for the entire session. We don't need DAVE's E2EE guarantee -- we're
-    # already a channel member with full audio access -- so force it on.
-    dave_session = getattr(voice_client._connection, "dave_session", None)
-    _log.info("dave_session at record start: %r", dave_session)
-    if dave_session is not None:
-        # The DAVE session's MLS key exchange happens asynchronously over
-        # the gateway *after* connect() returns, so it's still INACTIVE /
-        # not ready right here -- setting passthrough mode on it now gets
-        # discarded once the real handshake completes. Wait for it to
-        # actually go ready before arming passthrough. py-cord's own calls
-        # always pass a numeric expiry (120, 10) in discord/voice/state.py,
-        # never None, so None likely doesn't mean "no expiry" -- use a
-        # duration long enough to cover a whole session.
-        for _ in range(50):  # up to ~5s
-            if dave_session.ready:
-                break
-            await asyncio.sleep(0.1)
-        dave_session.set_passthrough_mode(True, 3600)
-        _log.info(
-            "set_passthrough_mode(True, 3600) called; status=%r ready=%r",
-            dave_session.status, dave_session.ready,
-        )
-
     loop = asyncio.get_running_loop()
-
     writer = TranscriptWriter(text_channel)
     _transcript_writers[ctx.guild.id] = writer
-
-    async def on_utterance(user_id: int, pcm_bytes: bytes):
-        await _handle_utterance(ctx.guild, writer, user_id, pcm_bytes)
-
-    def on_recording_finished(exception: Exception | None):
-        # Runs on py-cord's audio thread; hop back to the event loop for cleanup.
-        _active_recordings.discard(ctx.guild.id)
-        # The sink flushes any half-finished utterance during cleanup, so
-        # close the writer behind it rather than here, once those have been
-        # transcribed and appended.
-        asyncio.run_coroutine_threadsafe(_close_writer(ctx.guild.id), loop)
-        if exception:
-            asyncio.run_coroutine_threadsafe(
-                ctx.send(f"Recording stopped with an error: {exception}"), loop
-            )
+    cap = _Capture(
+        guild=ctx.guild,
+        voice_channel=ctx.author.voice.channel,
+        transcripts=text_channel,
+        chat=ctx.channel,
+        writer=writer,
+        loop=loop,
+    )
 
     # Recorded just before the first utterance can land, so the recap picks
     # up everything from this session and nothing from the last one.
     _recording_started_at[ctx.guild.id] = discord.utils.utcnow() - datetime.timedelta(seconds=5)
 
-    sink = UtteranceSink(loop, on_utterance)
-    # py-cord 2.8.0 no longer calls sink.init() itself anywhere in the voice
-    # module -- without this, self.sink.client stays None and PacketDecoder
-    # crashes looking up the speaking member.
-    sink.init(voice_client)
     _active_recordings.add(ctx.guild.id)
-    voice_client.start_recording(sink, on_recording_finished)
+    try:
+        await _start_capture(cap)
+    except Exception:
+        _active_recordings.discard(ctx.guild.id)
+        _transcript_writers.pop(ctx.guild.id, None)
+        raise
+    _captures[ctx.guild.id] = cap
+    _start_watchdog(cap)
+    _events.info(
+        "recording started in %s / %s on %s", ctx.guild.name, cap.voice_channel.name, transcriber.device
+    )
 
     await ctx.send(
         f"Recording on {transcriber.device.upper()} -- transcripts go to "
@@ -467,9 +602,13 @@ async def stoprecording(ctx: commands.Context):
         await ctx.send("Not currently recording.")
         return
 
+    cap = _captures.get(ctx.guild.id)
+    if cap is not None:
+        cap.stop_watchdog()
     if ctx.guild.id in _active_recordings:
         voice_client.stop_recording()
     await voice_client.disconnect()
+    _events.info("recording stopped in %s by %s", ctx.guild.name, ctx.author)
     await ctx.send("Stopped recording.")
 
     _recording_started_at.pop(ctx.guild.id, None)
@@ -822,7 +961,7 @@ async def _post_recap(
     # Logged *after* the send, and reporting what actually went out. The
     # previous version logged "posted recap" before sending anything, so the
     # log claimed success on a night when nothing reached the channel.
-    _log.info(
+    _events.info(
         "posted recap: %d embed(s)%s%s, %d chars of summary from %d chars of transcript",
         sent,
         f", style={style}" if style else "",

@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from collections import defaultdict, deque
 
@@ -25,24 +26,46 @@ RETRY_ATTEMPTS = 4
 # Generous, because the usual cause is a human reconnecting to wifi.
 RETRY_BACKOFF_S = (5, 20, 45)
 
-MODEL = "claude-haiku-4-5"
-MAX_TOKENS = 1024
-HISTORY_TURNS = 20  # user+assistant messages kept per channel
+# --- Model selection ---------------------------------------------------------
+# Set in .env as CHAT_MODEL / RECAP_MODEL. Each takes either:
+#   * a pinned model ID, e.g. "claude-opus-5-5" -- never changes underneath you;
+#   * "latest-<family>", e.g. "latest-haiku" -- the newest model of that family
+#     the API offers, looked up once at startup and logged.
+# The API itself has no floating "latest" alias (a dateless ID like
+# claude-haiku-5-5 is its own pinned snapshot), hence the lookup.
+#
+# Chat follows the newest Haiku by default: it's short, cheap, and has
+# little to tune. The recap is pinned by default, because a new version can
+# change behaviour under the same settings -- Opus 5.5 at the effort that
+# suited Opus 5 burned its whole token budget and wrote nothing. Switch it to
+# "latest-opus" only alongside a test recap.
+#
+# Chat stays on Haiku for latency (nobody wants to wait at the table for a
+# rules answer); the recap is once per session and is the artifact people
+# actually read, so it gets Opus.
+CHAT_MODEL_SETTING = os.getenv("CHAT_MODEL") or "latest-haiku"
+RECAP_MODEL_SETTING = os.getenv("RECAP_MODEL") or "claude-opus-5-5"
 
-# The recap runs on a stronger model than the chat does. It's once per
-# session rather than once per message, and it's the artifact people
-# actually read later -- a four-hour transcript comes to roughly 25k input
-# tokens, so Opus costs cents per session. Chat stays on Haiku for latency:
-# nobody wants to wait at the table for a rules answer.
-RECAP_MODEL = "claude-opus-5"
-# Thinking is on by default on Opus 5, and max_tokens caps thinking *plus*
-# response text. At effort="max" on a messy three-hour transcript, reasoning
-# alone can run past 16k -- and when it exhausts the budget the response
-# comes back as a lone thinking block with *no text at all* and
-# stop_reason="max_tokens". That is exactly how a recap silently vanished:
-# empty text, no exception, nothing posted. The recap itself is only ~700
-# tokens, so this ceiling is almost entirely headroom for thinking, and
-# unused budget costs nothing.
+# Used when a "latest-" lookup can't reach the API at startup.
+FAMILY_FALLBACK = {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-1",
+}
+
+# Chat replies are short; this is headroom so thinking on a hard rules
+# question can't eat the answer, not a target. Thinking is on by default
+# from Haiku 5.5 on, and "low" keeps it brief, which keeps replies fast.
+CHAT_MAX_TOKENS = 4096
+CHAT_EFFORT = "low"
+HISTORY_TURNS = 20  # user+assistant messages kept per channel
+# Thinking is always on, and max_tokens caps thinking *plus* response text.
+# When reasoning exhausts the budget the response comes back as a lone
+# thinking block with *no text at all* and stop_reason="max_tokens" -- an
+# HTTP 200, not an exception (_attempt() turns it into one). The recap
+# itself is only ~700 tokens, so this ceiling is almost entirely headroom
+# for thinking, and unused budget costs nothing.
 SUMMARY_MAX_TOKENS = 32_000
 
 # Transcripts are chunked before summarizing. This is far under the model's
@@ -54,10 +77,14 @@ SUMMARY_MAX_TOKENS = 32_000
 # (names, numbers, who said what) that one broad pass flattens away.
 SUMMARY_CHUNK_CHARS = 25_000
 
-# Reasoning effort for the recap. Cost per session is a few tens of cents
-# either way, and this is a once-a-week artifact people actually read, so
-# it's worth the ceiling. Drop to "high" to roughly halve the thinking spend.
-RECAP_EFFORT = "max"
+# Reasoning effort for the recap. Do NOT raise this to "max" on Opus 5.5:
+# measured on a 326-word sample, "max" spent the entire 32,000-token budget
+# on reasoning and wrote no recap in 3 of 3 runs (~$0.64 per pass), where
+# Opus 5 used ~1,600 tokens for the same pass. "high" finished every test
+# inside budget -- a real 20k-character session in 54s for $0.19, and a
+# 5-pass 13k-word session in 145s for $0.47 -- with the sharpest writing of
+# the levels tried. "medium" is ~40% cheaper but noticeably flatter.
+RECAP_EFFORT = "high"
 
 SYSTEM_PROMPT = (
     "You are a games night assistant for a Dungeons & Dragons 5e table. "
@@ -238,6 +265,43 @@ FOCUS_PROMPT = (
 )
 
 
+def _supported(capabilities: dict, *path: str) -> bool:
+    """Read one capability flag; unknown means "assume yes".
+
+    Unknown only happens when the model list couldn't be fetched, and then
+    the model is one of the FAMILY_FALLBACK defaults, all of which support
+    effort and adaptive thinking.
+    """
+    node = capabilities
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return True
+        node = node[key]
+    return bool(node.get("supported", True)) if isinstance(node, dict) else bool(node)
+
+
+def resolve_model(setting: str, available: list) -> tuple[str, dict]:
+    """Turn a CHAT_MODEL / RECAP_MODEL setting into (model_id, capabilities)."""
+    setting = setting.strip()
+    by_id = {m.id: m for m in available}
+    if setting.startswith("latest-"):
+        family = setting[len("latest-"):].lower()
+        candidates = [m for m in available if m.id.startswith(f"claude-{family}-")]
+        if candidates:
+            chosen = max(candidates, key=lambda m: m.created_at).id
+        else:
+            chosen = FAMILY_FALLBACK.get(family)
+            if chosen is None:
+                raise ValueError(f"unknown model family in {setting!r}; try latest-haiku or latest-opus")
+            _log.warning("could not look up %s; falling back to %s", setting, chosen)
+    else:
+        chosen = setting
+        if available and chosen not in by_id:
+            _log.warning("model %r is not in this API key's model list -- calls will likely fail", chosen)
+    caps = (by_id[chosen].model_dump().get("capabilities") or {}) if chosen in by_id else {}
+    return chosen, caps
+
+
 class ClaudeChatCaller:
     """Thin wrapper around the Claude API with a per-channel conversation history."""
 
@@ -245,18 +309,43 @@ class ClaudeChatCaller:
         self.client = anthropic.Anthropic()
         self._history = defaultdict(lambda: deque(maxlen=HISTORY_TURNS))
 
+        try:
+            available = list(self.client.with_options(timeout=15, max_retries=1).models.list(limit=100))
+        except Exception as exc:
+            _log.warning("could not list models (%s); using fallbacks for any latest- settings", exc)
+            available = []
+        self.chat_model, chat_caps = resolve_model(CHAT_MODEL_SETTING, available)
+        self.recap_model, recap_caps = resolve_model(RECAP_MODEL_SETTING, available)
+
+        # Gate each parameter on what the chosen model accepts, so a pinned
+        # older model (Haiku 4.5 rejects effort and adaptive thinking) still
+        # works instead of returning a 400 on every call.
+        self.chat_effort_ok = _supported(chat_caps, "effort")
+        self.recap_effort_ok = _supported(recap_caps, "effort")
+        self.recap_adaptive_ok = _supported(recap_caps, "thinking", "types", "adaptive")
+        _log.info(
+            "chat model: %s (from %r) | recap model: %s (from %r)",
+            self.chat_model, CHAT_MODEL_SETTING, self.recap_model, RECAP_MODEL_SETTING,
+        )
+
     def call(self, message: str, channel_id: int) -> str:
         history = self._history[channel_id]
         history.append({"role": "user", "content": message})
 
+        extra = {"output_config": {"effort": CHAT_EFFORT}} if self.chat_effort_ok else {}
         response = self.client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
+            model=self.chat_model,
+            max_tokens=CHAT_MAX_TOKENS,
             system=SYSTEM_PROMPT,
             messages=list(history),
+            **extra,
         )
 
-        reply = "".join(block.text for block in response.content if block.type == "text")
+        reply = "".join(block.text for block in response.content if block.type == "text").strip()
+        if not reply:
+            # Thinking used the budget, or a refusal. Say so rather than
+            # sending Discord an empty message (which it rejects outright).
+            return f"(No answer came back -- stop_reason={response.stop_reason}. Try rephrasing?)"
         history.append({"role": "assistant", "content": reply})
         return reply
 
@@ -306,15 +395,19 @@ class ClaudeChatCaller:
         # Streamed because max_tokens is well above the ~16k point where a
         # non-streaming request risks an HTTP timeout, and these calls
         # genuinely run for minutes at effort="max".
+        extra = {}
+        if self.recap_adaptive_ok:
+            extra["thinking"] = {"type": "adaptive"}
+        if self.recap_effort_ok:
+            extra["output_config"] = {"effort": RECAP_EFFORT}
         with self.client.beta.messages.stream(
-            model=RECAP_MODEL,
+            model=self.recap_model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": prompt}],
-            thinking={"type": "adaptive"},
-            output_config={"effort": RECAP_EFFORT},
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
+            **extra,
         ) as stream:
             response = stream.get_final_message()
 
