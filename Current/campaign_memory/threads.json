@@ -1,0 +1,41 @@
+{
+  "next_id": 6,
+  "board_message_id": 1563505667539599472,
+  "threads": [
+    {
+      "id": 1,
+      "title": "Whatever the switch opened and what screams",
+      "detail": "Llyr found a hidden switch behind Shar's statue; a grating sound opened something to the right with inhuman screaming.",
+      "status": "open",
+      "opened": "2026-10-24"
+    },
+    {
+      "id": 2,
+      "title": "The zombie teen and the low-voiced thing in the chasm",
+      "detail": "The teen, risen from the boy's corpse, grew five heads and survived the fall, screaming. Something low-voiced is down there with him.",
+      "status": "open",
+      "opened": "2026-10-24"
+    },
+    {
+      "id": 3,
+      "title": "Disarming the obelisk trap",
+      "detail": "The jet-black obelisks electrify anything passing between them. Catches under each can move, but nobody knows how to turn them off. Sykth is working on it.",
+      "status": "open",
+      "opened": "2026-10-24"
+    },
+    {
+      "id": 4,
+      "title": "Massatar and the Sanguine Vessel",
+      "detail": "The dwarf keeper and the Sanguine Vessel are still missing. Garstang's audience depends on finding them under the deal with the Baldur's Gate official.",
+      "status": "open",
+      "opened": "2026-10-24"
+    },
+    {
+      "id": 5,
+      "title": "Shar worship and Metheran's phylactery",
+      "detail": "The house's owner worshipped Shar, as does Metheran the lich. Is there a link to the phylactery the party is hunting?",
+      "status": "open",
+      "opened": "2026-10-24"
+    }
+  ]
+}

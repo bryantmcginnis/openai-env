@@ -1092,15 +1092,24 @@ async def threads_scan(ctx: commands.Context):
     """Build threads and quotes from the last session's transcript and recap."""
     guild = await _resolve_guild(ctx)
     channel = _find_transcription_channel(guild) if guild else None
-    start = await _resolve_session_start(channel) if channel else None
-    if start is None:
-        await ctx.send("I can't find a session in the last day to scan.")
+    if channel is None:
         return
-    transcript = await _collect_transcript(channel, start)
-    recap_text = ""
-    async for message in channel.history(limit=None, after=start, oldest_first=True):
-        if _is_recap(message):
-            recap_text = "\n".join(e.description or "" for e in message.embeds)
+    # Anchored on the latest recap rather than "now", so a session from days
+    # ago can still be scanned -- the transcript it was written from, and the
+    # recap as corrected.
+    group = await _find_last_recap(channel)
+    resolved = await _resolve_recap_start(channel, before=group[0]) if group else None
+    if resolved is not None:
+        start = resolved[0]
+        transcript = await _collect_transcript(channel, start, until=group[0])
+        recap_text = "\n".join(e.description or "" for m in group for e in m.embeds)
+    else:
+        start = await _resolve_session_start(channel)
+        if start is None:
+            await ctx.send("I can't find a recap, or a session in the last day, to scan.")
+            return
+        transcript = await _collect_transcript(channel, start)
+        recap_text = ""
     await ctx.send(f"Scanning {len(transcript):,} characters of the last session...")
     await _update_campaign_memory(ctx.channel, guild, start, transcript, recap_text)
 
