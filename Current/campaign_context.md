@@ -39,6 +39,18 @@ who they are and which character they play. Add the rest of the table.
 - **Justin** - Justin, playing Llyr Mabmoor, a welsh named ancient half elf druid, pronounced 'clear'
 -**Sykth** — me, Peter, Our resident halfling rogue, somewhat brash and forward thanks to his swashbuckler subclass. 
 
+<!--
+Speaker labels. The bot reads these lines to relabel every transcript line
+before the recap sees it, so "wildgoose: ..." becomes "Thia (Goose): ...".
+Format: - Discord name = Character (player), pronouns   (pronouns optional)
+-->
+- gossip repeater = DM (Joe)
+- wildgoose = Thia (Goose), she/her
+- Justin = Llyr (Justin)
+- Sykth = Sykth (Peter), he/him
+
+Out of game: Joe, the DM, practises law in real life.
+
 <!-- Example of the shape to aim for:
 - **gossip repeater** — Peter. The DM. Voices every NPC, narrates scenes,
   and calls for rolls. When this speaker describes something happening, it

@@ -131,6 +131,22 @@ Fill in:
 Double-click **`start_bot.bat`**, or the "D&D Bot" shortcut on your Desktop.
 The console window shows the live log; close it to stop the bot.
 
+**It restarts itself after a crash** (`run_bot.py`), waiting 10 s, then 30 s,
+then 60 s. Five crashes inside 15 minutes is a crash loop rather than bad
+luck, so it stops there and leaves the error on screen. `!shutdown` exits
+with code 0 and is never restarted, and closing the window stops it all.
+
+**If it was recording when it died, it carries on.** `!record` leaves a
+note in `campaign_memory/active_recording.json`, and `!stoprecording` /
+`!shutdown` remove it. On startup the bot rejoins any recording from the
+last 6 hours, provided someone is still in the voice channel, and says once:
+
+> ♻️ I crashed and restarted, so I've rejoined voice and I'm recording
+> again. The transcript has a gap from about 21:14 until now.
+
+That covers an accidentally closed window too: relaunch within 6 hours and
+the recording resumes.
+
 To create the Desktop and Start Menu shortcuts (once):
 
 ```powershell
@@ -150,7 +166,9 @@ shell redirection needed:
 
 - **`bot.log`** -- everything, rotating at 5 MB × 3.
 - **`bot_events.log`** -- only warnings, errors and session milestones
-  (recording started/stopped, recap posted, audio stalled/recovered),
+  (recording started/stopped, recap posted, audio stalled/recovered,
+  threads and quotes updated, a startup check of this PC's clock against
+  Discord's -- it warns if they're more than 10 s apart),
   rotating at 1 MB × 5. This is the one to read after a bad night: it holds
   weeks of timeline, and a flood in `bot.log` can't push it out.
 
@@ -464,6 +482,100 @@ a visible step within one recording:
 A quiet table never trips it -- silence sends no packets, so there's
 nothing failing. Two stalls in one recording cost at most two posts and one
 edit.
+
+## Character names, and fixing a recap
+
+**Who's who.** `campaign_context.md` has a "speaker labels" block:
+
+```
+- wildgoose = Thia (Goose), she/her
+```
+
+Before any recap, question or scan reads the transcript, the bot relabels
+each line, so `wildgoose: ...` becomes `Thia (Goose): ...`. The recap is
+told to use character names and pronouns in the story, and to use players'
+real names only in the **IRL:** bullets under Notable, which hold the best
+out-of-character moments. Add a line whenever someone new joins.
+
+**`!correct` (or `!fix`)** edits the latest party recap in place. It works
+best in a DM to the bot:
+
+> !correct The "terrible at practicing law" line was the DM, not Sykth.
+> The five-headed screamer IS the teen.
+
+The bot re-reads that session's transcript, rewrites only what the
+corrections touch, edits the original message (adding a "corrected by"
+footer), and replies with a list of the changes and a link. If the
+corrections also make an open thread or a quote's speaker wrong, it fixes
+those on `#potjf-to-do` and `#quotes` too. Corrections are kept in
+`campaign_memory/corrections.json` and added to that session's archived
+recap. A re-run recap, `!threads scan`, or a question about that night all
+treat them as fact, so the mistake doesn't come back. A correction costs
+about $0.10–0.30 on Opus.
+
+Some mistakes start in the transcript, not the recap. If someone's mic picks
+up the DM, the DM's line gets transcribed under that player's name, and the
+recap faithfully credits the wrong person. `!correct` is how you fix that.
+
+## Asking about the session
+
+`@bot` a question while a session is on, or for 12 hours after it ends, and
+it answers from what was actually said: tonight's transcript with
+timestamps, the last five recaps, the open threads, and the campaign notes.
+
+> **@dndbot** what did Sykth roll the last time he attacked?
+> At [22:37] Sykth said "there's a 22", which looks like his attack roll...
+
+Rules questions still get rules answers -- there's no separate router
+deciding which kind of question it is. The model gets both and is told
+which to use when; a router would cost a second call and an extra way to be
+wrong, to save a fraction of a cent. If something isn't in the records it
+says "I didn't catch that" instead of guessing, and it flags when an answer
+comes from an older session's recap rather than a transcript.
+
+A question costs about $0.003 on Haiku 5.5. The records are prompt-cached,
+so follow-ups a few minutes later are cheaper and faster (measured: 7.8 s
+for the first, 3.8 s after).
+
+## Open threads (`#potjf-to-do`)
+
+After each party recap, one extra call reads the night and updates the
+campaign's open threads: new hooks, promises and mysteries get added, and
+threads the transcript clearly settles are ticked off, each with how it was
+resolved and a quip. The list lives in **one pinned bot message in
+`#potjf-to-do`**, edited in place -- in the channel's own ⬜/✅ style -- and
+the bot never touches anyone else's messages there.
+
+| Command | Does |
+|---|---|
+| `!threads` | list the open threads |
+| `!threads add <text>` | add one by hand |
+| `!threads resolve <n> <how>` | tick one off |
+| `!threads reopen <n>` | undo that |
+| `!threads scan` | build threads and quotes from the last session |
+
+Personal recaps and literal `!recap 60` windows don't touch the list, so
+nothing is counted twice. Threads that differ by a word ("the silver key" /
+"the golden key") are kept separate; only near-identical restatements are
+merged. Everything is stored in `campaign_memory/` (threads, quotes, and an
+archive of every party recap), which is committed to git.
+
+## Quote board (`#quotes`)
+
+Three ways in:
+
+- **React ⭐ to a line in `#transcripts`** -- every line in that message
+  goes on the board, and the bot ticks it ✅.
+- **`!quote`** -- the last thing anyone said. `!quote Thia` for one
+  person's last line (Discord name or character name, read from
+  `campaign_context.md`), `!quote Thia 2` for the one before that.
+- **Automatically after each recap** -- the night's most memorable lines,
+  posted together in one message.
+
+The recap quotes are **checked word for word against the transcript**
+before posting. The model is told to copy them exactly, and anything it
+tidied up or invented is dropped rather than posted as something a friend
+supposedly said. Nothing is ever posted twice.
 
 ## Tuning transcription
 

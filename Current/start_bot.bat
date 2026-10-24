@@ -28,7 +28,8 @@ if not exist ".env" (
 
 REM -u keeps output unbuffered so the console updates live. The bot writes
 REM bot.log itself, so there's no redirection here -- you get both.
-".venv\Scripts\python.exe" -u main.py
+REM run_bot.py restarts the bot after a crash, but not after !shutdown.
+".venv\Scripts\python.exe" -u run_bot.py
 
 REM Only reached if the bot exits or crashes. Hold the window open so the
 REM error is readable instead of vanishing with the console.

@@ -175,6 +175,38 @@ def load_campaign_context(path: Path | None = None) -> str:
     return text.strip()
 
 
+_SPEAKER_RE = re.compile(
+    r"^\s*-\s*([^=*\n]+?)\s*=\s*([^(,\n]+?)\s*\(([^)\n]+)\)\s*(?:,\s*([^\n]+?))?\s*$"
+)
+
+
+def load_speakers() -> dict[str, dict]:
+    """Discord display name (lowercased) -> who that is at the table.
+
+    Read from campaign_context.md lines like `- wildgoose = Thia (Goose), she/her`.
+    The transcript labels lines by Discord name, which left the recap writer
+    to work out who plays whom -- and it once wrote "Goose" for Thia and gave
+    Goose Thia's pronoun. Relabelling the lines first removes the guesswork.
+    """
+    speakers = {}
+    for line in load_campaign_context().splitlines():
+        match = _SPEAKER_RE.match(line)
+        if not match:
+            continue
+        discord_name, character, player, pronouns = (g.strip() if g else "" for g in match.groups())
+        label = character if player.lower() == character.lower() else f"{character} ({player})"
+        speakers[discord_name.lower()] = {
+            "character": character, "player": player, "pronouns": pronouns, "label": label,
+        }
+    return speakers
+
+
+def relabel(speaker: str, speakers: dict | None = None) -> str:
+    """'wildgoose' -> 'Thia (Goose)'. Unknown names, and labels, pass through."""
+    entry = (load_speakers() if speakers is None else speakers).get(speaker.strip().lower())
+    return entry["label"] if entry else speaker
+
+
 def build_recap_briefing() -> str:
     """Everything the recap model should know about this campaign."""
     parts = [p for p in (load_campaign_context(), describe_name_corrections()) if p]

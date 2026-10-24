@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -98,6 +99,115 @@ SYSTEM_PROMPT = (
 )
 
 
+SESSION_QA_PROMPT = (
+    "You also have this table's session records below: campaign notes, the "
+    "open plot threads, recaps of recent sessions, and (if a session is on or "
+    "just finished) tonight's transcript with local times.\n\n"
+    "Work out which kind of question you've been asked. If it's about what "
+    "happened in their game -- what someone said, found, decided or promised, "
+    "who an NPC is, where the party stands -- answer from the records: be "
+    "specific, quote the line with its time like [20:41] where you can, and if "
+    "the records don't cover it, say you didn't catch that rather than "
+    "guessing. Older sessions only exist as recaps, so say when an answer comes "
+    "from a recap and might be missing detail. If it's a rules or general D&D "
+    "question, answer it normally from your own knowledge and ignore the "
+    "records.\n\n"
+    "The transcript is machine-generated: names get misheard (the notes list "
+    "the usual mishearings) and in-character play is mixed with table talk."
+)
+
+MEMORY_SYSTEM_PROMPT = (
+    "You keep two things for a D&D group: their list of open plot threads, and "
+    "a quote board. You'll get the current open threads, tonight's recap, and "
+    "tonight's raw transcript. The transcript is machine-generated, so names "
+    "may be misheard -- use the campaign notes to read them correctly."
+)
+
+MEMORY_PROMPT = (
+    "Update the records for tonight.\n\n"
+    "new_threads: hooks, mysteries, quests, debts and promises that are still "
+    "unresolved after tonight and are NOT already on the open list (if one is "
+    "already there, leave it; don't restate it). Only things that will matter "
+    "next session -- usually 1 to 5. title: at most 8 words. detail: one short "
+    "line of context, at most 25 words.\n\n"
+    "resolved: open threads (by id) that tonight's transcript clearly settles. "
+    "If it's merely mentioned or progressed, leave it open. how: one factual "
+    "sentence saying how it was resolved. quip: one short dry joke about the "
+    "resolution, at most 15 words, affectionate -- never at a player's "
+    "expense.\n\n"
+    "quotes: 3 to 8 of the night's most memorable lines. Copy each one WORD FOR "
+    "WORD from the transcript -- they are checked against it, and anything "
+    "reworded is thrown away. speaker: the name exactly as it appears before "
+    "the colon. Prefer in-character lines and genuinely funny table talk.\n\n"
+    "<open_threads>\n{threads}\n</open_threads>\n\n"
+    "<recap>\n{recap}\n</recap>\n\n"
+    "<transcript>\n{transcript}\n</transcript>"
+)
+
+MEMORY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "new_threads": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "detail": {"type": "string"}},
+            "required": ["title", "detail"], "additionalProperties": False}},
+        "resolved": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}, "how": {"type": "string"}, "quip": {"type": "string"}},
+            "required": ["id", "how", "quip"], "additionalProperties": False}},
+        "quotes": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"speaker": {"type": "string"}, "quote": {"type": "string"}},
+            "required": ["speaker", "quote"], "additionalProperties": False}},
+    },
+    "required": ["new_threads", "resolved", "quotes"],
+    "additionalProperties": False,
+}
+
+CORRECT_SYSTEM_PROMPT = (
+    "You correct a D&D session recap that the players have found mistakes in. "
+    "They were at the table: where a correction disagrees with the transcript, "
+    "the correction wins (the machine transcript mislabels speakers and "
+    "mishears names). Make every change the corrections ask for, plus anything "
+    "that follows from them -- use the transcript for that context. Leave "
+    "everything else exactly as it was: same structure, same voice, same "
+    "jokes. Call people by their character names and pronouns, and the "
+    "Dungeon Master \"the DM\" -- real names only in **IRL:** bullets."
+)
+
+CORRECT_PROMPT = (
+    "Apply the table's corrections.\n\n"
+    "recap: the whole corrected recap, in the same format.\n"
+    "changes: one short plain line per change you made.\n"
+    "thread_updates: open threads (by id) that the corrections make wrong, "
+    "with a corrected title and detail. Empty if none.\n"
+    "quote_fixes: quotes (by index) whose speaker the corrections change, with "
+    "the corrected label in the transcript's form, e.g. \"DM (Joe)\". Empty if none.\n\n"
+    "<corrections>\n{corrections}\n</corrections>\n\n"
+    "<recap>\n{recap}\n</recap>\n\n"
+    "<open_threads>\n{threads}\n</open_threads>\n\n"
+    "<quotes>\n{quotes}\n</quotes>\n\n"
+    "<transcript>\n{transcript}\n</transcript>"
+)
+
+CORRECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recap": {"type": "string"},
+        "changes": {"type": "array", "items": {"type": "string"}},
+        "thread_updates": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}, "title": {"type": "string"}, "detail": {"type": "string"}},
+            "required": ["id", "title", "detail"], "additionalProperties": False}},
+        "quote_fixes": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"index": {"type": "integer"}, "speaker": {"type": "string"}},
+            "required": ["index", "speaker"], "additionalProperties": False}},
+    },
+    "required": ["recap", "changes", "thread_updates", "quote_fixes"],
+    "additionalProperties": False,
+}
+
 RECAP_SYSTEM_PROMPT = (
     "You write session recaps for a Dungeons & Dragons 5e group, from raw "
     "voice transcripts of their table.\n\n"
@@ -106,6 +216,12 @@ RECAP_SYSTEM_PROMPT = (
     "with out-of-character table talk (rules arguments, dice, snacks, "
     "scheduling). Infer the intended proper nouns from context and use them "
     "consistently.\n\n"
+    "Each line is labelled with the speaker's character and, in brackets, the "
+    "player -- \"Thia (Goose): ...\". \"DM\" is the Dungeon Master. In the story, "
+    "always call people by their character's name and use the character's "
+    "pronouns from the campaign notes, and call the DM \"the DM\". Never use a player's name for their "
+    "character, and never infer a character's gender from the player's. "
+    "Players' real names belong only in the IRL bullets.\n\n"
     "Write with wit. The register is a sharp friend who was at the table and "
     "is retelling it well -- dry, affectionate, occasionally deadpan about "
     "the party's worse decisions. The comedy comes from what actually "
@@ -130,11 +246,13 @@ RECAP_PROMPT = (
     "**Loose threads** -- a short bullet list of unresolved hooks, unanswered "
     "questions, and things the party said they'd do next.\n"
     "**Notable** -- a few bullets for memorable rolls, kills, loot, NPCs met, "
-    "or quotable lines. Quote people directly where the line is worth it. "
+    "or quotable lines. Quote people directly where the line is worth it. If "
+    "something genuinely funny or interesting happened out of character, add "
+    "one or two bullets that start **IRL:**, using the players' real names. "
     "Skip this section if nothing stands out.\n\n"
-    "Ignore out-of-character table talk unless it's genuinely funny and worth "
-    "remembering. Keep the whole thing under 500 words -- brevity is part of "
-    "the wit.\n\n"
+    "Keep out-of-character table talk out of the narrative -- the best of it "
+    "goes in the IRL bullets. Keep the whole thing under 500 words -- brevity "
+    "is part of the wit.\n\n"
     "<transcript>\n{transcript}\n</transcript>"
 )
 
@@ -163,7 +281,9 @@ POLISH_PROMPT = (
 PARTIAL_PROMPT = (
     "This is part {part} of {total} of one session's transcript. Summarize "
     "just this part in detail: what happened, in order, plus any NPCs, "
-    "locations, decisions, and unresolved threads. Don't write an intro or "
+    "locations, decisions, and unresolved threads. Note any genuinely funny or "
+    "interesting out-of-character moments separately, marked IRL, with the "
+    "player's real name. Don't write an intro or "
     "conclusion -- this will be combined with the other parts.\n\n"
     "<transcript>\n{transcript}\n</transcript>"
 )
@@ -176,8 +296,9 @@ COMBINE_PROMPT = (
     "written like the cold open of a TV episode.\n"
     "**Loose threads** -- a short bullet list of unresolved hooks and things "
     "the party said they'd do next.\n"
-    "**Notable** -- a few bullets for memorable moments, NPCs, or loot. Skip "
-    "if nothing stands out.\n\n"
+    "**Notable** -- a few bullets for memorable moments, NPCs, or loot, plus "
+    "one or two **IRL:** bullets for the best out-of-character moments, using "
+    "the players' real names. Skip if nothing stands out.\n\n"
     "Give the whole session even weight. The natural failure here is to "
     "write the opening in vivid detail and then compress everything after "
     "it into a summary of a summary -- the last part of the night should be "
@@ -328,15 +449,29 @@ class ClaudeChatCaller:
             self.chat_model, CHAT_MODEL_SETTING, self.recap_model, RECAP_MODEL_SETTING,
         )
 
-    def call(self, message: str, channel_id: int) -> str:
+    def call(self, message: str, channel_id: int, context: tuple[str, str] | None = None) -> str:
+        """Answer a chat message. `context` is (stable_records, transcript) when a
+        session is on or recent, so questions about the game can be answered
+        from what was actually said."""
         history = self._history[channel_id]
         history.append({"role": "user", "content": message})
+
+        system: str | list = SYSTEM_PROMPT
+        if context is not None:
+            stable, transcript = context
+            # Stable records first and cached: follow-up questions in the next
+            # few minutes reread them at a fraction of the price. The
+            # transcript grows between questions, so it goes last.
+            system = [{"type": "text", "text": f"{SYSTEM_PROMPT}\n\n{SESSION_QA_PROMPT}\n\n{stable}",
+                       "cache_control": {"type": "ephemeral"}}]
+            if transcript:
+                system.append({"type": "text", "text": f"<tonights_transcript>\n{transcript}\n</tonights_transcript>"})
 
         extra = {"output_config": {"effort": CHAT_EFFORT}} if self.chat_effort_ok else {}
         response = self.client.messages.create(
             model=self.chat_model,
             max_tokens=CHAT_MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=list(history),
             **extra,
         )
@@ -348,6 +483,76 @@ class ClaudeChatCaller:
             return f"(No answer came back -- stop_reason={response.stop_reason}. Try rephrasing?)"
         history.append({"role": "assistant", "content": reply})
         return reply
+
+    def update_memory(self, transcript: str, recap: str, open_threads: list[dict], notes: str = "") -> dict:
+        """One structured call after a recap: new threads, resolved ones, quotes.
+
+        Structured output guarantees the reply parses, so a bad reply can't
+        corrupt the threads list -- worst case, nothing changes.
+        """
+        threads = json.dumps([{"id": t["id"], "title": t["title"], "detail": t["detail"]}
+                              for t in open_threads], ensure_ascii=False) or "[]"
+        system = MEMORY_SYSTEM_PROMPT + (f"\n\n{notes}" if notes else "")
+        config = {"format": {"type": "json_schema", "schema": MEMORY_SCHEMA}}
+        if self.chat_effort_ok:
+            config["effort"] = "medium"  # judging "is this resolved?" earns a little thought
+        response = self.client.messages.create(
+            model=self.chat_model,
+            max_tokens=8000,
+            system=system,
+            messages=[{"role": "user", "content": MEMORY_PROMPT.format(
+                threads=threads, recap=recap or "(no recap)", transcript=transcript)}],
+            output_config=config,
+        )
+        text = "".join(b.text for b in response.content if b.type == "text")
+        if response.stop_reason != "end_turn" or not text:
+            raise RuntimeError(f"memory update returned no result (stop_reason={response.stop_reason})")
+        return json.loads(text)
+
+    def correct_recap(self, recap: str, corrections: str, transcript: str,
+                      open_threads: list[dict], quotes: list[dict], notes: str = "") -> dict:
+        """Rewrite a posted recap to the table's corrections, and say what else
+        they touch. On the recap model: this is the artifact people read."""
+        prompt = CORRECT_PROMPT.format(
+            corrections=corrections, recap=recap,
+            threads=json.dumps([{"id": t["id"], "title": t["title"], "detail": t["detail"]}
+                                for t in open_threads], ensure_ascii=False),
+            quotes=json.dumps([{"index": q["index"], "speaker": q["speaker"], "text": q["text"]}
+                               for q in quotes], ensure_ascii=False),
+            transcript=transcript,
+        )
+        config = {"format": {"type": "json_schema", "schema": CORRECT_SCHEMA}}
+        if self.recap_effort_ok:
+            config["effort"] = "high"
+        extra = {"thinking": {"type": "adaptive"}} if self.recap_adaptive_ok else {}
+        last_error = None
+        for attempt in range(RETRY_ATTEMPTS):
+            if attempt:
+                time.sleep(RETRY_BACKOFF_S[min(attempt - 1, len(RETRY_BACKOFF_S) - 1)])
+            try:
+                with self.client.beta.messages.stream(
+                    model=self.recap_model,
+                    max_tokens=SUMMARY_MAX_TOKENS,
+                    system=CORRECT_SYSTEM_PROMPT + (f"\n\n{notes}" if notes else ""),
+                    messages=[{"role": "user", "content": prompt}],
+                    output_config=config,
+                    betas=["server-side-fallback-2026-07-01"],
+                    fallbacks="default",
+                    **extra,
+                ) as stream:
+                    response = stream.get_final_message()
+                break
+            except RETRYABLE as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(f"gave up after {RETRY_ATTEMPTS} attempts: {last_error}") from last_error
+        text = "".join(b.text for b in response.content if b.type == "text")
+        if response.stop_reason != "end_turn" or not text:
+            raise RuntimeError(f"the correction came back empty (stop_reason={response.stop_reason})")
+        result = json.loads(text)
+        if not result["recap"].strip():
+            raise RuntimeError("the correction returned an empty recap")
+        return result
 
     def reset(self, channel_id: int) -> None:
         """Clear conversation history for a channel (e.g. on a !forget command)."""
