@@ -138,7 +138,15 @@ MEMORY_PROMPT = (
     "quotes: 3 to 8 of the night's most memorable lines. Copy each one WORD FOR "
     "WORD from the transcript -- they are checked against it, and anything "
     "reworded is thrown away. speaker: the name exactly as it appears before "
-    "the colon. Prefer in-character lines and genuinely funny table talk.\n\n"
+    "the colon. Prefer in-character lines and genuinely funny table talk. "
+    "context: the one-line setup that makes the quote land for someone "
+    "reading the board weeks later: the one thing that prompted the line, "
+    "like a stage direction. One sentence, 6 to 15 words, no quotation marks, "
+    "and don't explain or repeat the joke. In-game moments use character "
+    "names and \"the DM\"; out-of-character ones use players' real names -- "
+    "never both for one person. e.g. *The boss rises again, eight feet tall, "
+    "with a mouth in its chest.* or *Joe mentions he leaves for work at 6:45.*\n\n"
+
     "<open_threads>\n{threads}\n</open_threads>\n\n"
     "<recap>\n{recap}\n</recap>\n\n"
     "<transcript>\n{transcript}\n</transcript>"
@@ -157,10 +165,66 @@ MEMORY_SCHEMA = {
             "required": ["id", "how", "quip"], "additionalProperties": False}},
         "quotes": {"type": "array", "items": {
             "type": "object",
-            "properties": {"speaker": {"type": "string"}, "quote": {"type": "string"}},
-            "required": ["speaker", "quote"], "additionalProperties": False}},
+            "properties": {"speaker": {"type": "string"}, "quote": {"type": "string"},
+                           "context": {"type": "string"}},
+            "required": ["speaker", "quote", "context"], "additionalProperties": False}},
     },
     "required": ["new_threads", "resolved", "quotes"],
+    "additionalProperties": False,
+}
+
+RELEASE_SYSTEM_PROMPT = (
+    "You write the release notes for a D&D group's Discord bot, posted in "
+    "their #dndbot-release-notes channel. The readers are the players: smart, "
+    "into D&D, mostly not programmers. Make it nerdy and fun -- D&D flavour, a "
+    "light joke or two -- but every line must make sense to someone who has "
+    "never written code. Lead with what they can now DO, and show the exact "
+    "command to type. Translate technical fixes into what the table "
+    "experienced (\"the bot stopped going deaf mid-session\"), and put any "
+    "genuinely interesting technical detail in a short *Nerd corner* line, "
+    "explained in plain words. Describe only what the commits and diff "
+    "actually show -- never invent features, numbers or plans. Leave out file "
+    "names, function names, internal refactors nobody would notice, and "
+    "anything about API keys or secrets."
+)
+
+RELEASE_PROMPT = (
+    "Write the post for these changes, in Discord markdown.\n\n"
+    "Start with one line: `# ` + an emoji + a short, playful title for this "
+    "update. Then whichever of these sections have something in them, as "
+    "`## ` headings with bullets:\n"
+    "- ✨ New -- features, each with how to use it\n"
+    "- 🔧 Improved -- existing things that got better\n"
+    "- 🐛 Fixed -- bugs squashed, told as what went wrong at the table\n"
+    "Tiny changes (one more phantom phrase on the ignore list) get one short "
+    "bullet at most. Keep the whole thing under 2500 characters -- shorter is "
+    "better for a small update. No sign-off.\n\n"
+    "Earlier posts, for voice and so you don't re-announce old features:\n"
+    "<earlier_posts>\n{earlier}\n</earlier_posts>\n\n"
+    "<commits>\n{log}\n</commits>\n\n"
+    "<diff>\n{diff}\n</diff>"
+)
+
+QUOTE_CONTEXT_PROMPT = (
+    "Someone at a D&D table put this line on the group's quote board:\n\n"
+    "{speaker}: \"{quote}\"\n\n"
+    "Here is the transcript around it; the quoted line is marked >>>. It's "
+    "machine-generated, so names may be "
+    "misheard -- the campaign notes list the usual mishearings.\n\n"
+    "<transcript>\n{surrounding}\n</transcript>\n\n"
+    "Write the one-line setup that makes the quote land for someone "
+    "reading the board weeks later: the one thing that prompted the line, "
+    "like a stage direction. One sentence, 6 to 15 words, no quotation marks, "
+    "and don't explain or repeat the joke. In-game moments use character "
+    "names and \"the DM\"; out-of-character ones use players' real names -- "
+    "never both for one person. e.g. *The boss rises again, eight feet tall, "
+    "with a mouth in its chest.* or *Joe mentions he leaves for work at 6:45.*\n\n"
+)
+
+QUOTE_CONTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {"context": {"type": "string"}},
+    "required": ["context"],
     "additionalProperties": False,
 }
 
@@ -508,6 +572,32 @@ class ClaudeChatCaller:
         if response.stop_reason != "end_turn" or not text:
             raise RuntimeError(f"memory update returned no result (stop_reason={response.stop_reason})")
         return json.loads(text)
+
+    def write_release_notes(self, log: str, diff: str, earlier: str = "") -> str:
+        """Turn commits + diff into a post for the table. On the recap model
+        (it has to read code and explain it plainly); a release is rare, so
+        the cost -- typically $0.10-0.50 -- doesn't matter."""
+        prompt = RELEASE_PROMPT.format(earlier=earlier or "(none yet)", log=log, diff=diff)
+        return self._complete(RELEASE_SYSTEM_PROMPT, prompt, SUMMARY_MAX_TOKENS)
+
+    def quote_context(self, speaker: str, quote: str, surrounding: str, notes: str = "") -> str:
+        """One line of scene-setting for a quote, from the lines around it.
+        A couple of seconds on the chat model, about $0.002."""
+        config = {"format": {"type": "json_schema", "schema": QUOTE_CONTEXT_SCHEMA}}
+        if self.chat_effort_ok:
+            config["effort"] = "medium"  # at low it grabbed the wrong moment from noisy transcripts
+        response = self.client.messages.create(
+            model=self.chat_model,
+            max_tokens=4000,
+            system=notes or SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": QUOTE_CONTEXT_PROMPT.format(
+                speaker=speaker, quote=quote, surrounding=surrounding or "(nothing nearby)")}],
+            output_config=config,
+        )
+        text = "".join(b.text for b in response.content if b.type == "text")
+        if response.stop_reason != "end_turn" or not text:
+            raise RuntimeError(f"no quote context came back (stop_reason={response.stop_reason})")
+        return json.loads(text)["context"].strip().strip("*_").strip()
 
     def correct_recap(self, recap: str, corrections: str, transcript: str,
                       open_threads: list[dict], quotes: list[dict], notes: str = "") -> dict:

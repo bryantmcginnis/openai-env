@@ -235,7 +235,8 @@ def load_quotes() -> dict:
     return _read("quotes.json", {"quotes": []})
 
 
-def remember_quote(speaker: str, text: str, source: str, message_id: int | None = None) -> bool:
+def remember_quote(speaker: str, text: str, source: str, message_id: int | None = None,
+                   context: str = "") -> bool:
     """Record a quote. False if it's already on the board -- check before posting."""
     with _lock:
         data = load_quotes()
@@ -244,7 +245,7 @@ def remember_quote(speaker: str, text: str, source: str, message_id: int | None 
                for q in data["quotes"]):
             return False
         data["quotes"].append({"speaker": speaker, "text": text, "source": source,
-                               "date": _today(), "message_id": message_id})
+                               "date": _today(), "message_id": message_id, "context": context})
         _write("quotes.json", data)
         return True
 
@@ -258,6 +259,19 @@ def set_quote_post(texts: list[str], posted_message_id: int) -> None:
             if _norm(q["text"]) in keys:
                 q["posted_message_id"] = posted_message_id
         _write("quotes.json", data)
+
+
+def set_quote_context(text: str, context: str) -> int | None:
+    """Attach the setup line to a quote. Returns its #quotes message, to be re-rendered."""
+    key = _norm(text)
+    with _lock:
+        data = load_quotes()
+        for q in data["quotes"]:
+            if _norm(q["text"]) == key:
+                q["context"] = context.strip()
+                _write("quotes.json", data)
+                return q.get("posted_message_id")
+    return None
 
 
 def quotes_since(date_iso: str) -> list[dict]:

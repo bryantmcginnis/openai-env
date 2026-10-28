@@ -1,13 +1,16 @@
 {
-  "next_id": 6,
+  "next_id": 10,
   "board_message_id": 1563505667539599472,
   "threads": [
     {
       "id": 1,
       "title": "Whatever the switch opened and what screams",
       "detail": "Llyr found a hidden switch behind Shar's statue; a grating sound opened something to the right with inhuman screaming.",
-      "status": "open",
-      "opened": "2026-10-24"
+      "status": "resolved",
+      "opened": "2026-10-24",
+      "resolved": "2026-10-28",
+      "how": "Llyr's switch and the screaming were tied to Massatar's study and the cell beyond it, though the screaming itself was never explained.",
+      "quip": "The screaming was the only thing in Candlekeep louder than Llyr's stories about his children."
     },
     {
       "id": 2,
@@ -36,6 +39,34 @@
       "detail": "The house's owner worshipped Shar, as does Metheran the lich. Is there a link to the phylactery the party is hunting?",
       "status": "open",
       "opened": "2026-10-24"
+    },
+    {
+      "id": 6,
+      "title": "The Hollow Saint and Massatar's cabal",
+      "detail": "Massatar's unsent letter says the Hollow Saint may be swayed; Llyr suspects the little girl outside is her. Massatar may already be in Baldur's Gate.",
+      "status": "open",
+      "opened": "2026-10-28"
+    },
+    {
+      "id": 7,
+      "title": "Garstang's stock and the black wine insignia",
+      "detail": "Massatar calls Garstang's supplier 'stock' and Dera overcharged for black wine. The wax insignia on the bottles is still unidentified.",
+      "status": "open",
+      "opened": "2026-10-28"
+    },
+    {
+      "id": 8,
+      "title": "Shar dagger and the two unread scrolls",
+      "detail": "The obsidian dagger bears Shar's sigil, and two scrolls in wax cylinders remain unread. Necrotic Nights is a suspected dud.",
+      "status": "open",
+      "opened": "2026-10-28"
+    },
+    {
+      "id": 9,
+      "title": "The devil with the keys and its doors",
+      "detail": "A bored six-armed devil is still stuck in a room of doors, now without Moonbeam pressure and no longer charmed. Its purpose is unknown.",
+      "status": "open",
+      "opened": "2026-10-28"
     }
   ]
 }

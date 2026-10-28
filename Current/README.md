@@ -572,10 +572,47 @@ Three ways in:
 - **Automatically after each recap** -- the night's most memorable lines,
   posted together in one message.
 
+Each quote gets **an italic setup line** above it, so it still makes sense
+weeks later:
+
+> *Joe mentions he leaves for work at 6:45.*
+> > Everyone likes a morning quickie.
+> — **Thia (Goose)**, 24 Oct 2026
+
+Recap quotes get theirs from the same call that picks them. ⭐ and `!quote`
+quotes post straight away, then a few seconds later the bot reads the
+lines around the quote (marked, so it knows which moment), asks Haiku for
+one sentence, and edits it in (about $0.005 each). If that fails, the quote
+just stays as it was.
+
 The recap quotes are **checked word for word against the transcript**
 before posting. The model is told to copy them exactly, and anything it
 tidied up or invented is dropped rather than posted as something a friend
 supposedly said. Nothing is ever posted twice.
+
+## Release notes (`#dndbot-release-notes`)
+
+The bot announces its own updates. At startup it compares the current git
+commit with the last one it announced (`campaign_memory/release_notes.json`).
+If there are new commits, it gives their messages and code diff to the
+recap model, which writes a post for the table: what's new and how to use
+it, what improved, and which bugs were fixed. Technical details are
+explained in plain words. The post goes to `#dndbot-release-notes` and is
+archived in `release_notes/`.
+
+- **Only committed code is announced.** Edits you haven't committed yet
+  are never described.
+- **To ship an update:** commit, then restart the bot (or send
+  `!releasenotes` if you're the owner and don't want to restart).
+- **The first run** posts `release_notes/history.md`, the hand-written
+  story of the bot so far, before any automatic notes.
+- **No channel, no post.** The bot never creates the channel, and nothing
+  is marked as announced, so the notes wait until the channel exists. If
+  writing the notes fails, the next start tries again.
+- **Cost:** one Opus call per release, typically $0.10–0.50.
+- **Better commit messages make better notes.** The writer only uses the
+  commit messages and the code, so "fix" tells it nothing, while "the bot
+  stopped hearing Goose after a reconnect" gives it something to work with.
 
 ## Tuning transcription
 

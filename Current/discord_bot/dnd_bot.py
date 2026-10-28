@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 from claude_caller.claude_caller import RECAP_STYLES, ClaudeChatCaller, resolve_style
 from discord_bot import campaign_memory as memory
-from discord_bot import dice, voice_health
+from discord_bot import dice, release_notes, voice_health
 from discord_bot.transcript_writer import TranscriptWriter
 from transcription.audio_sink import UtteranceSink
 from transcription.dnd_vocabulary import build_recap_briefing, load_speakers, relabel
@@ -65,6 +65,7 @@ _MENTION_RE = re.compile(r"<@!?\d+>")
 # the bot doesn't create channels.
 QUOTES_CHANNEL_NAME = os.getenv("QUOTES_CHANNEL_NAME") or "quotes"
 TODO_CHANNEL_NAME = os.getenv("TODO_CHANNEL_NAME") or "potjf-to-do"
+RELEASE_CHANNEL_NAME = os.getenv("RELEASE_CHANNEL_NAME") or "dndbot-release-notes"
 # React with one of these on a transcript line to put it on the quote board.
 QUOTE_EMOJIS = {"⭐", "🌟"}
 
@@ -164,6 +165,7 @@ async def on_ready():
     await asyncio.to_thread(_check_clock)
     for guild_id, info in memory.pending_resumes().items():
         asyncio.create_task(_resume_recording(guild_id, info))
+    _soon(_announce_releases())
 
 
 def _check_clock() -> None:
@@ -331,6 +333,53 @@ async def forget(ctx: commands.Context):
     """Clears the assistant's memory of this channel's conversation."""
     claude.reset(ctx.channel.id)
     await ctx.send("Cleared my memory of this channel.")
+
+
+_release_lock = asyncio.Lock()
+
+
+async def _announce_releases() -> str:
+    """Post release notes for any commits not yet announced. Runs at startup.
+
+    Never creates the channel: with no #dndbot-release-notes it does nothing,
+    and nothing is marked as announced, so the notes wait until it exists.
+    """
+    channels = [c for g in bot.guilds if (c := discord.utils.get(g.text_channels, name=RELEASE_CHANNEL_NAME))]
+    if not channels:
+        return f"There's no #{RELEASE_CHANNEL_NAME} channel to post in."
+    async with _release_lock:
+        try:
+            said = []
+            if not release_notes.history_posted() and release_notes.HISTORY.exists():
+                for channel in channels:
+                    for chunk in release_notes.split_for_discord(release_notes.HISTORY.read_text(encoding="utf-8")):
+                        await channel.send(chunk)
+                release_notes.mark_history_posted()
+                said.append("posted the history")
+            span = await asyncio.to_thread(release_notes.pending)
+            if span is None:
+                return " and ".join(said).capitalize() + "." if said else "Nothing new to announce."
+            log, diff = await asyncio.to_thread(release_notes.changes, *span)
+            earlier = release_notes.earlier_posts()
+            notes = await asyncio.to_thread(claude.write_release_notes, log, diff, earlier)
+            for channel in channels:
+                for chunk in release_notes.split_for_discord(notes):
+                    await channel.send(chunk)
+            release_notes.mark_announced(span[1], notes)
+            _events.info("release notes posted for %s..%s", span[0][:7], span[1][:7])
+            said.append(f"posted notes for {span[0][:7]}..{span[1][:7]}")
+            return " and ".join(said).capitalize() + "."
+        except Exception as exc:
+            _events.warning("release notes failed: %s", exc, exc_info=exc)
+            return f"Release notes failed ({exc}). Nothing was marked as announced, so it'll retry next start."
+
+
+@bot.command(name="releasenotes", aliases=["release"])
+@commands.is_owner()
+async def releasenotes(ctx: commands.Context):
+    """Post release notes for new commits now, instead of waiting for a restart. Owner only."""
+    status = await ctx.send("Checking for unannounced changes...")
+    await _say(status, ctx, await _announce_releases())
 
 
 @bot.command(name="shutdown", aliases=["sleep", "die"])
@@ -848,29 +897,70 @@ def _speaker_label(speaker: str) -> str:
     return relabel(speaker)
 
 
-def _quote_block(speaker: str, text: str, date_iso: str) -> str:
+def _quote_block(speaker: str, text: str, date_iso: str, context: str = "") -> str:
+    """*setup line*, then the quote, then who said it and when."""
     try:
         stamp = datetime.date.fromisoformat(date_iso).strftime("%d %b %Y").lstrip("0")
     except ValueError:
         stamp = date_iso
-    return f"> {text}\n— **{_speaker_label(speaker)}**, {stamp}"
+    setup = f"*{context.strip('*_ ')}*\n" if context and context.strip("*_ ") else ""
+    return f"{setup}> {text}\n— **{_speaker_label(speaker)}**, {stamp}"
 
 
-async def _post_quotes(guild: discord.Guild, quotes: list[tuple[str, str]], source: str,
+_background: set[asyncio.Task] = set()  # keeps fire-and-forget tasks from being garbage-collected
+
+
+def _soon(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _add_quote_context(guild: discord.Guild, speaker: str, text: str, at: datetime.datetime) -> None:
+    """Fill in a ⭐ or !quote quote's setup line after it's posted.
+
+    The quote goes up straight away; this reads the transcript around it,
+    asks the chat model for one line of context, and edits it in. If any of
+    that fails, the quote just stays as it was.
+    """
+    channel = _find_transcription_channel(guild)
+    if channel is None:
+        return
+    try:
+        speakers = load_speakers()
+        edge = at + datetime.timedelta(seconds=1)
+        before = [m async for m in channel.history(limit=30, before=edge)]
+        after = [m async for m in channel.history(limit=6, after=edge, oldest_first=True)]
+        key = memory._norm(text)[:60]
+        lines = [(">>> " if key in memory._norm(m.content) else "") + _labelled_line(m.content, speakers)
+                 for m in list(reversed(before)) + after if _is_transcript_line(m)]
+        context = await asyncio.to_thread(
+            claude.quote_context, relabel(speaker, speakers), text, "\n".join(lines), build_recap_briefing())
+        post = memory.set_quote_context(text, context)
+        if post:
+            await _rerender_quote_post(guild, post)
+    except Exception as exc:
+        _events.warning("couldn't add context to a quote: %s", exc)
+
+
+async def _post_quotes(guild: discord.Guild, quotes: list[tuple], source: str,
                        message_id: int | None = None) -> int:
-    """Post quotes to the quote board, skipping any already on it. Returns how many went up."""
+    """Post quotes to the quote board, skipping any already on it. Returns how many went up.
+
+    Each quote is (speaker, text) or (speaker, text, context)."""
     channel = discord.utils.get(guild.text_channels, name=QUOTES_CHANNEL_NAME)
     if channel is None:
         _events.warning("no #%s channel in %s; quote not posted", QUOTES_CHANNEL_NAME, guild.name)
         return 0
-    fresh = [(sp, tx.strip()) for sp, tx in quotes
-             if tx.strip() and memory.remember_quote(sp, tx.strip(), source, message_id)]
+    fresh = [(q[0], q[1].strip(), q[2] if len(q) > 2 else "") for q in quotes
+             if q[1].strip() and memory.remember_quote(
+                 q[0], q[1].strip(), source, message_id, q[2] if len(q) > 2 else "")]
     if not fresh:
         return 0
     today = datetime.date.today().isoformat()
     chunk, texts = "", []
-    for speaker, text in fresh:  # several quotes share a message; Discord caps one at 2000 chars
-        block = _quote_block(speaker, text, today)
+    for speaker, text, context in fresh:  # several quotes share a message; Discord caps one at 2000 chars
+        block = _quote_block(speaker, text, today, context)
         if chunk and len(chunk) + len(block) + 2 > 1900:
             posted = await channel.send(chunk)
             memory.set_quote_post(texts, posted.id)
@@ -932,7 +1022,8 @@ async def _update_campaign_memory(chat, guild: discord.Guild, since: datetime.da
 
     # Only lines that were really said. The model is told to copy word for
     # word; anything it tidied up or invented is dropped here.
-    real = [(q["speaker"], q["quote"]) for q in result["quotes"] if memory.appears_in(q["quote"], transcript)]
+    real = [(q["speaker"], q["quote"], q.get("context", "")) for q in result["quotes"]
+            if memory.appears_in(q["quote"], transcript)]
     try:
         posted = await _post_quotes(guild, real, source="recap")
     except discord.HTTPException as exc:
@@ -975,6 +1066,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if not match:
         return
     if await _post_quotes(guild, [(match.group(1), match.group(2))], source="star", message_id=message.id):
+        _soon(_add_quote_context(guild, match.group(1), match.group(2).strip(), message.created_at))
         try:
             await message.add_reaction("✅")
         except discord.HTTPException:
@@ -1022,8 +1114,9 @@ async def quote(ctx: commands.Context, *, args: str = ""):
     if len(lines) < max(back, 1):
         await ctx.send(f"I haven't heard {'anything from ' + who if who else 'anything'} to quote yet.")
         return
-    speaker, text, _ = lines[-max(back, 1)]
+    speaker, text, said_at = lines[-max(back, 1)]
     if await _post_quotes(guild, [(speaker, text)], source="!quote"):
+        _soon(_add_quote_context(guild, speaker, text.strip(), said_at.astimezone()))
         await ctx.message.add_reaction("✅")
     else:
         await ctx.send("That one's already on the quote board.")
@@ -1160,7 +1253,8 @@ async def _rerender_quote_post(guild: discord.Guild, posted_message_id: int) -> 
     channel = discord.utils.get(guild.text_channels, name=QUOTES_CHANNEL_NAME)
     if channel is None:
         return
-    blocks = [_quote_block(q["speaker"], q["text"], q["date"]) for q in memory.quotes_in_post(posted_message_id)]
+    blocks = [_quote_block(q["speaker"], q["text"], q["date"], q.get("context", ""))
+              for q in memory.quotes_in_post(posted_message_id)]
     if blocks:
         message = await channel.fetch_message(posted_message_id)
         await message.edit(content="\n\n".join(blocks))
