@@ -488,7 +488,7 @@ edit.
 **Who's who.** `campaign_context.md` has a "speaker labels" block:
 
 ```
-- wildgoose = Thia (Goose), she/her
+- wildgoose = Thia (Goose), Thia: she/her, Goose: he/him
 ```
 
 Before any recap, question or scan reads the transcript, the bot relabels

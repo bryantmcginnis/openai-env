@@ -183,7 +183,7 @@ _SPEAKER_RE = re.compile(
 def load_speakers() -> dict[str, dict]:
     """Discord display name (lowercased) -> who that is at the table.
 
-    Read from campaign_context.md lines like `- wildgoose = Thia (Goose), she/her`.
+    Read from campaign_context.md lines like `- wildgoose = Thia (Goose), Thia: she/her, Goose: he/him`.
     The transcript labels lines by Discord name, which left the recap writer
     to work out who plays whom -- and it once wrote "Goose" for Thia and gave
     Goose Thia's pronoun. Relabelling the lines first removes the guesswork.

@@ -42,12 +42,18 @@ who they are and which character they play. Add the rest of the table.
 <!--
 Speaker labels. The bot reads these lines to relabel every transcript line
 before the recap sees it, so "wildgoose: ..." becomes "Thia (Goose): ...".
-Format: - Discord name = Character (player), pronouns   (pronouns optional)
+Format: - Discord name = Character (player), Character: pronouns, player: pronouns
+Name whose pronouns are whose: a bare "she/her" after "(Goose)" once got
+read as Goose's, and an IRL bullet called Goose "her".
 -->
-- gossip repeater = DM (Joe)
-- wildgoose = Thia (Goose), she/her
+- gossip repeater = DM (Joe), Joe: he/him
+- wildgoose = Thia (Goose), Thia: she/her, Goose: he/him
 - Justin = Llyr (Justin)
-- Sykth = Sykth (Peter), he/him
+- Sykth = Sykth (Peter), Sykth: he/him, Peter: he/him
+
+A character's pronouns are not their player's. Thia is a woman (she/her);
+Goose, who plays her, is a man (he/him). In the story, Thia is "she". In
+IRL bullets about Goose himself, Goose is "he".
 
 Out of game: Joe, the DM, practises law in real life.
 
